@@ -104,6 +104,7 @@ jobs:
     # the same gates locally / via ci.yml on `main`.
     if: ${{ !cancelled() && (needs.parity.result == 'success' || needs.parity.result == 'skipped') }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           # --- codewhale (cli dispatcher, canonical) ---
@@ -111,7 +112,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: codewhale
             artifact_name: codewhale-linux-x64
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary: codewhale
             artifact_name: codewhale-linux-arm64
@@ -136,7 +137,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: codewhale-tui
             artifact_name: codewhale-tui-linux-x64
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary: codewhale-tui
             artifact_name: codewhale-tui-linux-arm64
@@ -161,7 +162,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: deepseek
             artifact_name: deepseek-linux-x64
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary: deepseek
             artifact_name: deepseek-linux-arm64
@@ -182,7 +183,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             binary: deepseek-tui
             artifact_name: deepseek-tui-linux-x64
-          - os: ubuntu-24.04-arm
+          - os: ubuntu-latest
             target: aarch64-unknown-linux-gnu
             binary: deepseek-tui
             artifact_name: deepseek-tui-linux-arm64
@@ -238,13 +239,26 @@ jobs:
           sudo dpkg --add-architecture riscv64
           sudo apt-get update -o Dir::Etc::sourcelist=/etc/apt/sources.list.d/riscv64.sources -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0
           sudo apt-get install -y libdbus-1-dev:riscv64
+      - name: Install AArch64 cross-compilation toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu' && runner.os == 'Linux'
+        run: |
+          sudo dpkg --add-architecture arm64
+          for i in 1 2 3 4 5; do
+            sudo apt-get update && break
+            echo "apt-get update failed (attempt $i); retrying in 15s"
+            sleep 15
+          done
+          sudo apt-get install -y gcc-aarch64-linux-gnu libc6-dev-arm64-cross libdbus-1-dev:arm64 pkg-config
       - name: Build
         shell: bash
         env:
           DEEPSEEK_BUILD_SHA: ${{ needs.resolve.outputs.sha }}
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CC_riscv64gc_unknown_linux_gnu: riscv64-linux-gnu-gcc
           CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
           PKG_CONFIG_ALLOW_CROSS: 1
+          PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu: /usr/lib/aarch64-linux-gnu/pkgconfig
           PKG_CONFIG_LIBDIR_riscv64gc_unknown_linux_gnu: /usr/lib/riscv64-linux-gnu/pkgconfig
         run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Rename binary
