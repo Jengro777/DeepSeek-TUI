@@ -1321,9 +1321,7 @@ pub(super) fn apply_reasoning_effort(
                 };
                 body["reasoning_effort"] = json!(value);
             }
-            ApiProvider::Openai
-            | ApiProvider::WanjieArk
-            | ApiProvider::OpenaiCodex => {}
+            ApiProvider::Openai | ApiProvider::WanjieArk | ApiProvider::OpenaiCodex => {}
             ApiProvider::Atlascloud => {
                 // #3024: Atlascloud serves DeepSeek models.
                 body["reasoning_effort"] = json!("high");
@@ -1375,9 +1373,7 @@ pub(super) fn apply_reasoning_effort(
                 // "max" to "high" instead of sending an invalid value.
                 body["reasoning_effort"] = json!("high");
             }
-            ApiProvider::Openai
-            | ApiProvider::WanjieArk
-            | ApiProvider::OpenaiCodex => {}
+            ApiProvider::Openai | ApiProvider::WanjieArk | ApiProvider::OpenaiCodex => {}
             ApiProvider::Atlascloud => {
                 // #3024: Atlascloud serves DeepSeek models.
                 body["reasoning_effort"] = json!("high");
