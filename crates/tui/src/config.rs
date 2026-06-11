@@ -7905,6 +7905,25 @@ api_key = "old-openrouter-key"
     }
 
     #[test]
+    fn requested_model_for_provider_is_permissive_off_deepseek() {
+        // #3018: the provider API is the authority for non-DeepSeek routes.
+        assert_eq!(
+            requested_model_for_provider(ApiProvider::Moonshot, "kimi-k2.5").as_deref(),
+            Some("kimi-k2.5")
+        );
+        assert_eq!(
+            requested_model_for_provider(ApiProvider::Ollama, "qwen3:32b").as_deref(),
+            Some("qwen3:32b")
+        );
+        // The official DeepSeek API stays strict.
+        assert!(requested_model_for_provider(ApiProvider::Deepseek, "kimi-k2.5").is_none());
+        assert_eq!(
+            requested_model_for_provider(ApiProvider::Deepseek, "deepseek-v4-pro").as_deref(),
+            Some("deepseek-v4-pro")
+        );
+    }
+
+    #[test]
     fn wire_model_for_provider_matches_active_provider_shape() {
         assert_eq!(
             wire_model_for_provider(ApiProvider::Deepseek, DEFAULT_OPENROUTER_MODEL),
