@@ -36,9 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   table and falls back to `[providers.siliconflow]` only for unset
   `api_key`/`base_url`/`model` fields. Thanks @Artenx for the report and
   @idling11 for the PR.
+- **Self-update download timeout (#3006).** `codewhale update` now applies a
+  five-minute HTTP client timeout so blocked or very slow GitHub release
+  downloads fail instead of hanging indefinitely. Thanks @New2Niu for the PR.
 - **Constitution trust wording (#2950/#3008).** The base prompt now explains
   that "begins with an A" means a baseline of trust, not a literal output
   formatting rule. Thanks @cyq1017 for the PR.
+- **TUI provider-source recovery (#3007/#3011).** Unsupported interactive
+  providers now report whether the value came from `--provider`, environment,
+  or config. Config-sourced unsupported providers fall back to DeepSeek without
+  forwarding stale keyring secrets. Thanks @cyq1017 for the PR.
 - **TUI mouse-report leak (#3063/#3067).** Strip raw SGR mouse coordinate
   tails from the composer even when `use_mouse_capture` is false, covering
   orphaned terminal reporting state after crashes or focus races.
