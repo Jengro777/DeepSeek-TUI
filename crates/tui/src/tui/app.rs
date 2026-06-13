@@ -2566,8 +2566,30 @@ impl App {
         true
     }
 
+    /// Whether mode/thinking selection is locked because a turn is in flight.
+    ///
+    /// While `is_loading`, the model/permission surface the engine is acting on
+    /// must not shift underneath it, so user-initiated mode and thinking changes
+    /// are refused (#2982). Returns true (and posts a concise status message) if
+    /// the change should be rejected — the caller leaves the selection unchanged
+    /// so the chip "twitches" back instead of moving.
+    fn reject_setting_change_while_busy(&mut self, what: &str) -> bool {
+        if self.is_loading {
+            self.status_message = Some(format!(
+                "{what} is locked while a turn is running — press Esc to interrupt first"
+            ));
+            self.needs_redraw = true;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Cycle through modes: Plan → Agent → YOLO → Plan.
     pub fn cycle_mode(&mut self) {
+        if self.reject_setting_change_while_busy("Mode") {
+            return;
+        }
         let next = match self.mode {
             AppMode::Plan => AppMode::Agent,
             AppMode::Agent => AppMode::Yolo,
@@ -2579,6 +2601,9 @@ impl App {
     /// Cycle through modes in reverse.
     #[allow(dead_code)]
     pub fn cycle_mode_reverse(&mut self) {
+        if self.reject_setting_change_while_busy("Mode") {
+            return;
+        }
         let next = match self.mode {
             AppMode::Agent => AppMode::Plan,
             AppMode::Yolo => AppMode::Agent,
@@ -2589,6 +2614,9 @@ impl App {
 
     /// Cycle reasoning-effort through the active provider's distinct tiers.
     pub fn cycle_effort(&mut self) {
+        if self.reject_setting_change_while_busy("Thinking") {
+            return;
+        }
         self.reasoning_effort = self
             .reasoning_effort
             .cycle_next_for_provider(self.api_provider);
@@ -5578,6 +5606,40 @@ mod tests {
         app.reasoning_effort = ReasoningEffort::Auto;
         app.last_effective_reasoning_effort = Some(ReasoningEffort::Max);
         assert_eq!(app.reasoning_effort_display_label(), "auto: xhigh");
+    }
+
+    #[test]
+    fn mode_and_thinking_are_locked_while_a_turn_is_running() {
+        // #2982: while a turn is in flight, user-initiated mode/thinking changes
+        // are refused with a concise message instead of shifting the surface the
+        // engine is acting on.
+        let mut app = App::new(test_options(false), &Config::default());
+        app.mode = AppMode::Agent;
+        app.reasoning_effort = ReasoningEffort::Max;
+        app.is_loading = true;
+
+        app.cycle_mode();
+        assert_eq!(app.mode, AppMode::Agent, "mode must not change while busy");
+        assert!(
+            app.status_message
+                .as_deref()
+                .unwrap_or_default()
+                .contains("locked"),
+            "expected a 'locked' status message, got {:?}",
+            app.status_message
+        );
+
+        let before_effort = app.reasoning_effort;
+        app.cycle_effort();
+        assert_eq!(
+            app.reasoning_effort, before_effort,
+            "thinking must not change while busy"
+        );
+
+        // Once the turn finishes, the same gesture works again.
+        app.is_loading = false;
+        app.cycle_mode();
+        assert_ne!(app.mode, AppMode::Agent, "mode should change when idle");
     }
 
     #[test]
