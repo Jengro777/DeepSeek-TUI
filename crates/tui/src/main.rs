@@ -29,6 +29,7 @@ mod composer_stash;
 mod config;
 mod config_persistence;
 mod config_ui;
+mod context_budget;
 mod context_report;
 mod core;
 mod cost_status;
