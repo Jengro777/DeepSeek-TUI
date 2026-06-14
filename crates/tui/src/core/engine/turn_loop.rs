@@ -2393,7 +2393,7 @@ impl Engine {
             return None;
         }
 
-        let snapshot = match self.config.goal_state.lock() {
+        let mut snapshot = match self.config.goal_state.lock() {
             Ok(state) => state.snapshot(),
             Err(err) => {
                 tracing::warn!("goal state lock poisoned during continuation check: {err}");
@@ -2405,26 +2405,46 @@ impl Engine {
             return None;
         }
 
-        let max = crate::tools::goal::MAX_GOAL_CONTINUATIONS_PER_TURN;
+        let per_turn_max = crate::tools::goal::MAX_GOAL_CONTINUATIONS_PER_TURN;
+        if *continuations_this_turn >= per_turn_max {
+            let _ = self
+                .tx_event
+                .send(Event::status(format!(
+                    "Goal remains active after {per_turn_max} continuation pass(es) this turn; ending turn to avoid a runaway loop."
+                )))
+                .await;
+            return None;
+        }
+
+        let run_max = crate::tools::goal::MAX_GOAL_CONTINUATIONS_PER_RUN;
         // Route the continuation decision through the goal-loop decision core
-        // (#3215). The hook has already returned for non-active goals, so the
-        // status here is Active; the decision currently enforces the per-turn
-        // continuation cap (behavior-preserving). This is the seam where durable
-        // cross-turn budget — token/time from the per-goal accounting wired in
-        // `crates/state` `record_thread_goal_usage` — will be enforced as goal
-        // mode becomes a persistent work loop.
+        // (#3215). The progress fields are now sourced from the shared goal
+        // snapshot instead of only the per-turn local counter. Train 3 owns the
+        // deep worker re-dispatcher that will persist these same increments into
+        // ThreadGoal via `record_thread_goal_usage` /
+        // `record_thread_goal_continuation`.
         let decision = crate::goal_loop::decide_continuation(
             crate::goal_loop::GoalRunStatus::Active,
             crate::goal_loop::GoalProgress {
-                continuations: *continuations_this_turn,
-                ..Default::default()
+                tokens_used: snapshot.tokens_used,
+                time_used_seconds: snapshot.time_used_seconds,
+                continuations: snapshot.continuation_count,
             },
-            crate::goal_loop::GoalBudget::with_continuation_cap(max),
+            crate::goal_loop::GoalBudget {
+                token_budget: snapshot.token_budget.map(u64::from),
+                time_budget_seconds: None,
+                max_continuations: run_max,
+            },
         );
         if let crate::goal_loop::ContinuationDecision::Stop(reason) = decision {
             let message = match reason {
                 crate::goal_loop::StopReason::ContinuationLimit => format!(
-                    "Goal remains active after {max} continuation pass(es); ending turn to avoid a runaway loop."
+                    "Goal remains active after {run_max} total continuation pass(es); ending turn to avoid a runaway loop."
+                ),
+                crate::goal_loop::StopReason::TokenBudget => format!(
+                    "Goal token budget reached ({} / {} tokens); ending continuation.",
+                    snapshot.tokens_used,
+                    snapshot.token_budget.unwrap_or_default()
                 ),
                 other => format!("Goal continuation stopped: {other:?}."),
             };
@@ -2433,18 +2453,27 @@ impl Engine {
         }
 
         *continuations_this_turn = (*continuations_this_turn).saturating_add(1);
+        match self.config.goal_state.lock() {
+            Ok(mut state) => {
+                state.record_continuation();
+                snapshot = state.snapshot();
+            }
+            Err(err) => {
+                tracing::warn!("goal state lock poisoned while recording continuation: {err}")
+            }
+        }
         let _ = self
             .tx_event
             .send(Event::status(format!(
-                "Continuing active goal audit ({}/{max})",
-                *continuations_this_turn
+                "Continuing active goal audit ({}/{per_turn_max} this turn, {} total)",
+                *continuations_this_turn, snapshot.continuation_count
             )))
             .await;
 
         Some(crate::tools::goal::render_continuation_prompt(
             &snapshot,
             *continuations_this_turn,
-            max,
+            per_turn_max,
         ))
     }
 

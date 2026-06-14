@@ -1,6 +1,6 @@
 use codewhale_protocol::{
-    EventFrame, ThreadGoal, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams, ThreadRequest,
-    ThreadResumeParams,
+    EventFrame, ThreadGoal, ThreadGoalProgressParams, ThreadGoalSetParams, ThreadGoalStatus,
+    ThreadListParams, ThreadRequest, ThreadResumeParams,
     runtime::{RUNTIME_EVENT_ENVELOPE_SCHEMA_VERSION, RuntimeEventEnvelope},
 };
 use serde_json::{Value, json};
@@ -85,6 +85,7 @@ fn thread_goal_event_serializes_status_and_accounting() {
         token_budget: Some(42_000),
         tokens_used: 42_001,
         time_used_seconds: 3600,
+        continuation_count: 7,
         created_at: 1,
         updated_at: 2,
     };
@@ -94,6 +95,30 @@ fn thread_goal_event_serializes_status_and_accounting() {
     assert_eq!(encoded["event"], "thread_goal_updated");
     assert_eq!(encoded["goal"]["status"], "budget_limited");
     assert_eq!(encoded["goal"]["tokens_used"], 42_001);
+    assert_eq!(encoded["goal"]["continuation_count"], 7);
+}
+
+#[test]
+fn thread_goal_progress_request_round_trip() {
+    let request = ThreadRequest::GoalRecordProgress(ThreadGoalProgressParams {
+        thread_id: "thread-123".to_string(),
+        token_delta: 750,
+        time_delta_seconds: 9,
+        record_continuation: true,
+    });
+
+    let encoded = serde_json::to_string(&request).expect("serialize goal progress request");
+    assert!(encoded.contains("goal_record_progress"));
+    let decoded: ThreadRequest = serde_json::from_str(&encoded).expect("deserialize request");
+    match decoded {
+        ThreadRequest::GoalRecordProgress(params) => {
+            assert_eq!(params.thread_id, "thread-123");
+            assert_eq!(params.token_delta, 750);
+            assert_eq!(params.time_delta_seconds, 9);
+            assert!(params.record_continuation);
+        }
+        other => panic!("unexpected request: {other:?}"),
+    }
 }
 
 #[test]

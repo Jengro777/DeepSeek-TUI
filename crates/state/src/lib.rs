@@ -230,6 +230,8 @@ pub struct ThreadGoalRecord {
     pub tokens_used: i64,
     /// Elapsed wall-clock work time in seconds.
     pub time_used_seconds: i64,
+    /// Durable continuation passes dispatched for this objective.
+    pub continuation_count: i64,
     /// Unix timestamp (seconds) when the goal was created.
     pub created_at: i64,
     /// Unix timestamp (seconds) when the goal was last updated.
@@ -547,6 +549,20 @@ impl StateStore {
                 "#,
             )
             .context("failed to initialize thread goal schema")?;
+            user_version = 3;
+        }
+        if user_version < 4 {
+            conn.execute_batch(
+                r#"
+                BEGIN;
+                ALTER TABLE thread_goals
+                    ADD COLUMN continuation_count INTEGER NOT NULL DEFAULT 0;
+
+                PRAGMA user_version = 4;
+                COMMIT;
+                "#,
+            )
+            .context("failed to initialize thread goal continuation schema")?;
         }
         Ok(())
     }
@@ -752,8 +768,8 @@ impl StateStore {
             r#"
             INSERT INTO thread_goals (
                 thread_id, goal_id, objective, status, token_budget, tokens_used,
-                time_used_seconds, created_at, updated_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+                time_used_seconds, continuation_count, created_at, updated_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(thread_id) DO UPDATE SET
                 goal_id=excluded.goal_id,
                 objective=excluded.objective,
@@ -761,6 +777,7 @@ impl StateStore {
                 token_budget=excluded.token_budget,
                 tokens_used=excluded.tokens_used,
                 time_used_seconds=excluded.time_used_seconds,
+                continuation_count=excluded.continuation_count,
                 created_at=excluded.created_at,
                 updated_at=excluded.updated_at
             "#,
@@ -772,6 +789,7 @@ impl StateStore {
                 goal.token_budget,
                 goal.tokens_used,
                 goal.time_used_seconds,
+                goal.continuation_count,
                 goal.created_at,
                 goal.updated_at,
             ],
@@ -821,13 +839,41 @@ impl StateStore {
         self.get_thread_goal(thread_id)
     }
 
+    /// Increment the durable cross-turn continuation counter for a thread goal.
+    ///
+    /// The older TUI continuation guard is scoped to one engine turn. This
+    /// counter is intentionally persisted so a resumed goal loop can feed
+    /// `goal_loop::decide_continuation` with the true cross-turn count.
+    pub fn record_thread_goal_continuation(
+        &self,
+        thread_id: &str,
+        now: i64,
+    ) -> Result<Option<ThreadGoalRecord>> {
+        let conn = self.conn()?;
+        let changed = conn
+            .execute(
+                r#"
+                UPDATE thread_goals
+                SET continuation_count = continuation_count + 1,
+                    updated_at = MAX(updated_at, ?2)
+                WHERE thread_id = ?1
+                "#,
+                params![thread_id, now],
+            )
+            .context("failed to record thread goal continuation")?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_thread_goal(thread_id)
+    }
+
     /// Retrieve the persisted goal for a thread.
     pub fn get_thread_goal(&self, thread_id: &str) -> Result<Option<ThreadGoalRecord>> {
         let conn = self.conn()?;
         conn.query_row(
             r#"
             SELECT thread_id, goal_id, objective, status, token_budget, tokens_used,
-                   time_used_seconds, created_at, updated_at
+                   time_used_seconds, continuation_count, created_at, updated_at
             FROM thread_goals
             WHERE thread_id = ?1
             "#,
@@ -1685,8 +1731,9 @@ fn row_to_thread_goal(row: &rusqlite::Row<'_>) -> rusqlite::Result<ThreadGoalRec
         token_budget: row.get(4)?,
         tokens_used: row.get(5)?,
         time_used_seconds: row.get(6)?,
-        created_at: row.get(7)?,
-        updated_at: row.get(8)?,
+        continuation_count: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
     })
 }
 
@@ -1744,6 +1791,7 @@ mod tests {
             token_budget: Some(123),
             tokens_used: 7,
             time_used_seconds: 11,
+            continuation_count: 0,
             created_at: 100,
             updated_at: 101,
         }
@@ -1826,6 +1874,7 @@ mod tests {
         assert_eq!(after_first.status, goal.status);
         assert_eq!(after_first.token_budget, goal.token_budget);
         assert_eq!(after_first.created_at, goal.created_at);
+        assert_eq!(after_first.continuation_count, 0);
 
         // Second accrual adds on top of the first (additive, not replacing).
         let after_second = store
@@ -1872,5 +1921,39 @@ mod tests {
                 .expect("read goal")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn record_thread_goal_continuation_accumulates_durably() {
+        let store = temp_state_store("thread-goal-continuation");
+        store
+            .upsert_thread(&test_thread("thread-1"))
+            .expect("upsert thread");
+
+        let mut goal = test_goal("thread-1", "Keep working across turns");
+        goal.updated_at = 100;
+        store.upsert_thread_goal(&goal).expect("upsert goal");
+
+        let after_first = store
+            .record_thread_goal_continuation("thread-1", 120)
+            .expect("record continuation")
+            .expect("goal exists");
+        assert_eq!(after_first.continuation_count, 1);
+        assert_eq!(after_first.tokens_used, goal.tokens_used);
+        assert_eq!(after_first.time_used_seconds, goal.time_used_seconds);
+        assert_eq!(after_first.updated_at, 120);
+
+        let after_second = store
+            .record_thread_goal_continuation("thread-1", 110)
+            .expect("record second continuation")
+            .expect("goal exists");
+        assert_eq!(after_second.continuation_count, 2);
+        assert_eq!(after_second.updated_at, 120);
+
+        let persisted = store
+            .get_thread_goal("thread-1")
+            .expect("read goal")
+            .expect("goal exists");
+        assert_eq!(persisted.continuation_count, 2);
     }
 }

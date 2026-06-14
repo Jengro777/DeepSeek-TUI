@@ -16,9 +16,9 @@ use codewhale_mcp::{
 use codewhale_protocol::{
     AppResponse, EventFrame, ExecApprovalRequestEvent, PromptRequest, PromptResponse,
     ResponseChannel, ReviewDecision, Thread, ThreadForkParams, ThreadGoal, ThreadGoalClearParams,
-    ThreadGoalGetParams, ThreadGoalSetParams, ThreadGoalStatus, ThreadListParams, ThreadReadParams,
-    ThreadRequest, ThreadResponse, ThreadResumeParams, ThreadSetNameParams, ThreadStatus,
-    ToolPayload,
+    ThreadGoalGetParams, ThreadGoalProgressParams, ThreadGoalSetParams, ThreadGoalStatus,
+    ThreadListParams, ThreadReadParams, ThreadRequest, ThreadResponse, ThreadResumeParams,
+    ThreadSetNameParams, ThreadStatus, ToolPayload,
 };
 use codewhale_state::{
     JobStateRecord, JobStateStatus, SessionSource, StateStore, ThreadGoalRecord,
@@ -660,6 +660,7 @@ impl ThreadManager {
             token_budget: params.token_budget,
             tokens_used: 0,
             time_used_seconds: 0,
+            continuation_count: 0,
             created_at: now,
             updated_at: now,
         };
@@ -673,6 +674,36 @@ impl ThreadManager {
             .store
             .get_thread_goal(&params.thread_id)?
             .map(to_protocol_goal))
+    }
+
+    /// Accrues durable per-goal usage and/or a continuation pass for a thread.
+    pub fn record_thread_goal_progress(
+        &mut self,
+        params: &ThreadGoalProgressParams,
+    ) -> Result<Option<ThreadGoal>> {
+        if self.store.get_thread(&params.thread_id)?.is_none() {
+            return Ok(None);
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        let mut goal = if params.token_delta != 0 || params.time_delta_seconds != 0 {
+            self.store.record_thread_goal_usage(
+                &params.thread_id,
+                params.token_delta,
+                params.time_delta_seconds,
+                now,
+            )?
+        } else {
+            self.store.get_thread_goal(&params.thread_id)?
+        };
+
+        if params.record_continuation {
+            goal = self
+                .store
+                .record_thread_goal_continuation(&params.thread_id, now)?;
+        }
+
+        Ok(goal.map(to_protocol_goal))
     }
 
     /// Clears the persisted goal for a thread, returning whether one existed.
@@ -1055,6 +1086,40 @@ impl Runtime {
                     },
                     data: json!({ "cleared": cleared }),
                 })
+            }
+            ThreadRequest::GoalRecordProgress(params) => {
+                let thread_id = params.thread_id.clone();
+                if let Some(goal) = self.thread_manager.record_thread_goal_progress(&params)? {
+                    Ok(ThreadResponse {
+                        thread_id,
+                        status: "ok".to_string(),
+                        thread: None,
+                        threads: Vec::new(),
+                        goal: Some(goal.clone()),
+                        model: None,
+                        model_provider: None,
+                        cwd: None,
+                        approval_policy: None,
+                        sandbox: None,
+                        events: vec![EventFrame::ThreadGoalUpdated { goal: goal.clone() }],
+                        data: json!({ "goal": goal }),
+                    })
+                } else {
+                    Ok(ThreadResponse {
+                        thread_id,
+                        status: "missing".to_string(),
+                        thread: None,
+                        threads: Vec::new(),
+                        goal: None,
+                        model: None,
+                        model_provider: None,
+                        cwd: None,
+                        approval_policy: None,
+                        sandbox: None,
+                        events: Vec::new(),
+                        data: json!({"error":"thread or goal not found"}),
+                    })
+                }
             }
             ThreadRequest::Archive { thread_id } => {
                 self.thread_manager.archive_thread(&thread_id)?;
@@ -1692,6 +1757,7 @@ fn to_protocol_goal(goal: ThreadGoalRecord) -> ThreadGoal {
         token_budget: goal.token_budget,
         tokens_used: goal.tokens_used,
         time_used_seconds: goal.time_used_seconds,
+        continuation_count: goal.continuation_count,
         created_at: goal.created_at,
         updated_at: goal.updated_at,
     }
@@ -1984,6 +2050,40 @@ mod tests {
     use super::*;
     use codewhale_tools::ToolCallSource;
 
+    fn temp_core_state(name: &str) -> StateStore {
+        let dir =
+            std::env::temp_dir().join(format!("codewhale-core-{name}-{}", Uuid::new_v4().simple()));
+        std::fs::create_dir_all(&dir).expect("create temp state dir");
+        StateStore::open(Some(dir.join("state.db"))).expect("open state store")
+    }
+
+    fn test_thread_metadata(id: &str) -> ThreadMetadata {
+        ThreadMetadata {
+            id: id.to_string(),
+            rollout_path: None,
+            preview: "test thread".to_string(),
+            ephemeral: false,
+            model_provider: "deepseek".to_string(),
+            created_at: 10,
+            updated_at: 10,
+            status: PersistedThreadStatus::Running,
+            path: None,
+            cwd: PathBuf::from("/tmp/codewhale"),
+            cli_version: "0.0.0-test".to_string(),
+            source: SessionSource::Interactive,
+            name: None,
+            sandbox_policy: None,
+            approval_mode: None,
+            archived: false,
+            archived_at: None,
+            git_sha: None,
+            git_branch: None,
+            git_origin_url: None,
+            memory_mode: None,
+            current_leaf_id: None,
+        }
+    }
+
     // ── JobManager: lifecycle ──────────────────────────────────────────
 
     #[test]
@@ -2039,6 +2139,47 @@ mod tests {
         };
 
         assert_eq!(permission_path_for_call(&call), None);
+    }
+
+    #[test]
+    fn thread_goal_progress_accumulates_durable_accounting() {
+        let store = temp_core_state("thread-goal-progress");
+        store
+            .upsert_thread(&test_thread_metadata("thread-1"))
+            .expect("upsert thread");
+        let mut manager = ThreadManager::new(store);
+        manager
+            .set_thread_goal(&ThreadGoalSetParams {
+                thread_id: "thread-1".to_string(),
+                objective: "Carry the goal across turns".to_string(),
+                token_budget: Some(2_000),
+            })
+            .expect("set goal")
+            .expect("goal exists");
+
+        let updated = manager
+            .record_thread_goal_progress(&ThreadGoalProgressParams {
+                thread_id: "thread-1".to_string(),
+                token_delta: 750,
+                time_delta_seconds: 12,
+                record_continuation: true,
+            })
+            .expect("record progress")
+            .expect("goal exists");
+
+        assert_eq!(updated.tokens_used, 750);
+        assert_eq!(updated.time_used_seconds, 12);
+        assert_eq!(updated.continuation_count, 1);
+
+        let persisted = manager
+            .get_thread_goal(&ThreadGoalGetParams {
+                thread_id: "thread-1".to_string(),
+            })
+            .expect("read goal")
+            .expect("goal exists");
+        assert_eq!(persisted.tokens_used, 750);
+        assert_eq!(persisted.time_used_seconds, 12);
+        assert_eq!(persisted.continuation_count, 1);
     }
 
     #[test]

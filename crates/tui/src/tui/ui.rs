@@ -3949,6 +3949,9 @@ async fn run_event_loop(
                                 }
                                 app.active_allowed_tools = None;
                                 app.hunt.quarry = None;
+                                app.hunt.tokens_used = 0;
+                                app.hunt.time_used_seconds = 0;
+                                app.hunt.continuation_count = 0;
                                 app.status_message = Some("Paused command cancelled".to_string());
                             } else {
                                 engine_handle.cancel();
@@ -5755,6 +5758,9 @@ fn prepare_paused_command_message(
         Some(paused_command_note(&title, true))
     } else {
         app.hunt.quarry = None;
+        app.hunt.tokens_used = 0;
+        app.hunt.time_used_seconds = 0;
+        app.hunt.continuation_count = 0;
         Some(paused_command_note(&title, false))
     }
 }
@@ -5765,6 +5771,9 @@ fn pause_pausable_command(app: &mut App, engine_handle: &EngineHandle) {
         .clone()
         .or_else(|| app.hunt.quarry.clone());
     app.hunt.quarry = None;
+    app.hunt.tokens_used = 0;
+    app.hunt.time_used_seconds = 0;
+    app.hunt.continuation_count = 0;
     app.paused = true;
     app.pausable = true;
     engine_handle.set_paused(true);
@@ -6024,6 +6033,9 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
     let objective_changed = app.hunt.quarry.as_deref() != Some(objective);
     let changed = objective_changed
         || app.hunt.token_budget != snapshot.token_budget
+        || app.hunt.tokens_used != snapshot.tokens_used
+        || app.hunt.time_used_seconds != snapshot.time_used_seconds
+        || app.hunt.continuation_count != snapshot.continuation_count
         || app.hunt.verdict != verdict;
     if !changed {
         return false;
@@ -6031,6 +6043,9 @@ pub(crate) fn apply_goal_snapshot_to_app(app: &mut App, snapshot: &GoalSnapshot)
 
     app.hunt.quarry = Some(objective.to_string());
     app.hunt.token_budget = snapshot.token_budget;
+    app.hunt.tokens_used = snapshot.tokens_used;
+    app.hunt.time_used_seconds = snapshot.time_used_seconds;
+    app.hunt.continuation_count = snapshot.continuation_count;
     app.hunt.verdict = verdict;
     if objective_changed || app.hunt.started_at.is_none() {
         app.hunt.started_at = Some(Instant::now());

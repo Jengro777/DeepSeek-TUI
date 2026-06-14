@@ -1531,6 +1531,19 @@ impl Engine {
         }
     }
 
+    fn record_goal_usage_for_turn(&self, usage: &Usage, elapsed: std::time::Duration) {
+        let token_delta =
+            u64::from(usage.input_tokens).saturating_add(u64::from(usage.output_tokens));
+        let time_delta_seconds = elapsed.as_secs();
+        if token_delta == 0 && time_delta_seconds == 0 {
+            return;
+        }
+        match self.config.goal_state.lock() {
+            Ok(mut state) => state.record_usage(token_delta, time_delta_seconds),
+            Err(err) => tracing::warn!("goal state lock poisoned while recording usage: {err}"),
+        }
+    }
+
     async fn add_session_message(&mut self, message: Message) {
         self.session.add_message(message);
         self.emit_session_updated().await;
@@ -2006,6 +2019,7 @@ impl Engine {
 
         // Update session usage
         self.session.total_usage.add(&turn.usage);
+        self.record_goal_usage_for_turn(&turn.usage, turn.elapsed());
 
         // Emit turn complete event — after all post-turn bookkeeping so
         // the terminal is immediately responsive when the UI receives it.

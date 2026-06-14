@@ -74,6 +74,7 @@ pub struct ThreadGoal {
     pub token_budget: Option<i64>,
     pub tokens_used: i64,
     pub time_used_seconds: i64,
+    pub continuation_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -182,6 +183,17 @@ pub struct ThreadGoalClearParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ThreadGoalProgressParams {
+    pub thread_id: String,
+    #[serde(default)]
+    pub token_delta: i64,
+    #[serde(default)]
+    pub time_delta_seconds: i64,
+    #[serde(default)]
+    pub record_continuation: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ThreadRequest {
     Create {
@@ -197,6 +209,7 @@ pub enum ThreadRequest {
     GoalSet(ThreadGoalSetParams),
     GoalGet(ThreadGoalGetParams),
     GoalClear(ThreadGoalClearParams),
+    GoalRecordProgress(ThreadGoalProgressParams),
     Archive {
         thread_id: String,
     },

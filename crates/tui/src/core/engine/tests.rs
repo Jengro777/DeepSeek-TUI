@@ -414,8 +414,16 @@ async fn runtime_goal_updates_emit_ui_snapshot() {
     {
         let mut goal = engine.config.goal_state.lock().expect("goal lock");
         goal.create("Ship the release lane".to_string(), Some(42_000));
-        goal.mark_complete("verified with focused tests".to_string())
-            .expect("mark complete");
+        goal.mark_complete(
+            "verified with focused tests".to_string(),
+            crate::tools::goal::GoalCompletionVerification {
+                status: "passed".to_string(),
+                check: "cargo test -p codewhale-tui runtime_goal_updates_emit_ui_snapshot"
+                    .to_string(),
+                summary: "focused runtime goal snapshot test passed".to_string(),
+            },
+        )
+        .expect("mark complete");
     }
 
     engine.emit_goal_updated().await;
