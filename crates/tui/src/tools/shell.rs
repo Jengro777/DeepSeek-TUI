@@ -46,6 +46,7 @@ use crate::sandbox::{
     SandboxPolicy as ExecutionSandboxPolicy, // Rename to avoid conflict with spec::SandboxPolicy
     SandboxType,
 };
+use crate::worker_profile::ShellPolicy;
 
 /// Status of a shell process
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -2122,6 +2123,19 @@ impl ToolSpec for ExecShellTool {
         context: &ToolContext,
     ) -> Result<ToolResult, ToolError> {
         let command = required_str(&input, "command")?;
+        match context.shell_policy {
+            ShellPolicy::None => {
+                return Ok(ToolResult::error(
+                    "Shell tools are disabled by the active permission profile.",
+                ));
+            }
+            ShellPolicy::ReadOnly if !exec_shell_input_is_parallel_readonly(&input) => {
+                return Ok(ToolResult::error(
+                    "Shell command blocked by read-only shell policy. Use a non-mutating, non-background inspection command, or switch to Agent/YOLO for write-capable shell work.",
+                ));
+            }
+            ShellPolicy::ReadOnly | ShellPolicy::Full => {}
+        }
         let timeout_ms = optional_u64(&input, "timeout_ms", 120_000).min(600_000);
         let background = optional_bool(&input, "background", false);
         let interactive = optional_bool(&input, "interactive", false);

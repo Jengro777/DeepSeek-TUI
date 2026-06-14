@@ -200,6 +200,57 @@ fn exec_shell_parallel_flags_are_input_aware() {
     })));
 }
 
+#[tokio::test]
+async fn read_only_shell_policy_blocks_non_readonly_commands() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+    let tool = ExecShellTool;
+
+    let result = tool
+        .execute(json!({"command": "cargo build"}), &ctx)
+        .await
+        .expect("execute");
+    assert!(!result.success);
+    assert!(result.content.contains("read-only shell policy"));
+
+    let result = tool
+        .execute(
+            json!({"command": "git status -s", "background": true}),
+            &ctx,
+        )
+        .await
+        .expect("execute");
+    assert!(!result.success);
+    assert!(result.content.contains("read-only shell policy"));
+}
+
+#[tokio::test]
+async fn read_only_shell_policy_allows_readonly_inspection() {
+    let tmp = tempdir().expect("tempdir");
+    let ctx = ToolContext::new(tmp.path())
+        .with_shell_policy(crate::worker_profile::ShellPolicy::ReadOnly);
+
+    let result = ExecShellTool
+        .execute(json!({"command": "pwd"}), &ctx)
+        .await
+        .expect("execute");
+
+    assert!(
+        result.success,
+        "unexpected shell failure: {}",
+        result.content
+    );
+    assert_eq!(
+        result
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("status"))
+            .and_then(Value::as_str),
+        Some("Completed")
+    );
+}
+
 #[test]
 #[cfg(unix)]
 fn shell_execution_scrubs_parent_env_and_keeps_explicit_env() {
