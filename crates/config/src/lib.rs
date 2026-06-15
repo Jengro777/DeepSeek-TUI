@@ -3341,6 +3341,19 @@ impl ConfigStore {
             })?;
         }
         let body = toml::to_string_pretty(&self.config).context("failed to serialize config")?;
+        match fs::read_to_string(&self.path) {
+            Ok(existing) => {
+                if existing == body {
+                    return Ok(());
+                }
+                write_one_time_config_backup(&self.path)?;
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(err)
+                    .with_context(|| format!("failed to read config at {}", self.path.display()));
+            }
+        }
         #[cfg(unix)]
         {
             let mut file = fs::OpenOptions::new()
@@ -3391,6 +3404,39 @@ impl ConfigStore {
             ExecPolicyEngine::with_rulesets(vec![self.permissions.ruleset()])
         }
     }
+}
+
+fn config_backup_path(path: &Path) -> PathBuf {
+    let mut file_name = path
+        .file_name()
+        .map(std::ffi::OsString::from)
+        .unwrap_or_else(|| std::ffi::OsString::from(CONFIG_FILE_NAME));
+    file_name.push(".bak");
+    path.with_file_name(file_name)
+}
+
+fn write_one_time_config_backup(path: &Path) -> Result<()> {
+    let backup = config_backup_path(path);
+    if backup.exists() {
+        return Ok(());
+    }
+    fs::copy(path, &backup).with_context(|| {
+        format!(
+            "failed to create config backup {} from {}",
+            backup.display(),
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).with_context(|| {
+            format!(
+                "failed to set config backup permissions at {}",
+                backup.display()
+            )
+        })?;
+    }
+    Ok(())
 }
 
 /// Process-wide default [`Secrets`] façade. The first caller wins; the
@@ -5677,6 +5723,85 @@ unix_socket_path = "/tmp/cw-hooks.sock"
 
         let mode = fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn config_store_save_skips_identical_serialized_body() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "codewhale-config-noop-save-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join(CONFIG_FILE_NAME);
+        let config = ConfigToml {
+            model: Some("deepseek-v4-flash".to_string()),
+            ..ConfigToml::default()
+        };
+        let body = toml::to_string_pretty(&config).expect("serialize");
+        fs::write(&path, &body).expect("seed config");
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).expect("chmod seed");
+
+        let store = ConfigStore {
+            path: path.clone(),
+            config,
+            permissions: PermissionsToml::default(),
+        };
+        store.save().expect("identical save should not rewrite");
+
+        #[cfg(unix)]
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("chmod restore");
+        assert_eq!(fs::read_to_string(&path).expect("read config"), body);
+        assert!(
+            !config_backup_path(&path).exists(),
+            "no-op save must not create a migration backup"
+        );
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn config_store_save_creates_one_time_backup_before_changed_write() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "codewhale-config-backup-save-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).expect("mkdir");
+        let path = dir.join(CONFIG_FILE_NAME);
+        let original = "model = \"deepseek-v4-flash\"\n";
+        fs::write(&path, original).expect("seed config");
+
+        let store = ConfigStore {
+            path: path.clone(),
+            config: ConfigToml {
+                model: Some("deepseek-v4-pro".to_string()),
+                ..ConfigToml::default()
+            },
+            permissions: PermissionsToml::default(),
+        };
+        store.save().expect("changed save");
+
+        let backup_path = config_backup_path(&path);
+        assert_eq!(
+            fs::read_to_string(&backup_path).expect("read backup"),
+            original
+        );
+        let updated = fs::read_to_string(&path).expect("read updated config");
+        assert!(updated.contains("model = \"deepseek-v4-pro\""));
 
         let _ = fs::remove_dir_all(dir);
     }
