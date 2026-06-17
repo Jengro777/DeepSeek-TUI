@@ -23,6 +23,8 @@ fn make_snapshot(status: SubAgentStatus) -> SubAgentResult {
         nickname: None,
         status,
         worker_status: None,
+        parent_run_id: None,
+        spawn_depth: 0,
         result: None,
         steps_taken: 0,
         checkpoint: None,
@@ -2348,6 +2350,37 @@ fn would_exceed_depth_at_boundary() {
     );
 }
 
+#[tokio::test]
+async fn rate_limit_pause_blocks_subagent_spawn() {
+    let _guard = crate::retry_status::test_guard();
+    crate::retry_status::clear();
+    crate::retry_status::clear_rate_limit();
+    crate::retry_status::note_rate_limit(Duration::from_secs(30));
+
+    let tmp = tempdir().expect("tempdir");
+    let mut runtime = stub_runtime();
+    runtime.context = ToolContext::new(tmp.path().to_path_buf());
+    let manager = new_shared_subagent_manager(tmp.path().to_path_buf(), 2);
+
+    let err = spawn_subagent_from_input(
+        json!({"prompt": "inspect the retry gate"}),
+        Arc::clone(&manager),
+        runtime,
+    )
+    .await
+    .expect_err("active provider rate-limit pause must refuse new sub-agent work");
+
+    assert!(
+        err.to_string().contains("rate-limiting"),
+        "error should name the provider throttle: {err}"
+    );
+    assert!(
+        manager.read().await.list().is_empty(),
+        "refused spawn must not register or launch a worker"
+    );
+    crate::retry_status::clear_rate_limit();
+}
+
 #[test]
 fn child_runtime_increments_depth_and_preserves_auto_approve() {
     let mut parent = stub_runtime();
@@ -2909,6 +2942,7 @@ fn stub_runtime() -> SubAgentRuntime {
         max_spawn_depth: DEFAULT_MAX_SPAWN_DEPTH,
         cancel_token: CancellationToken::new(),
         mailbox: None,
+        parent_agent_id: None,
         parent_completion_tx: None,
         fork_context: None,
         mcp_pool: None,
@@ -3198,12 +3232,11 @@ fn persist_round_trip_preserves_session_boot_id() {
 
 // === Issue #756: parent-completion wakeup ===
 //
-// When a direct child of the engine finishes, `run_subagent_task` emits
-// a `SubAgentCompletion` on the runtime's `parent_completion_tx`. The
-// engine's turn loop drains that channel before deciding to end the turn.
-// These tests cover the gating logic in `emit_parent_completion` so the
-// parent isn't flooded with grandchild completions and so the function
-// is safe when no channel is wired.
+// When an agent finishes, `run_subagent_task` emits a `SubAgentCompletion` on
+// the runtime's `parent_completion_tx`. For root-spawned agents the engine turn
+// loop drains that channel; for nested agents the running parent sub-agent
+// owns a local receiver and injects the completion into its own transcript.
+// These tests cover the routing logic and no-channel safety.
 
 fn runtime_with_depth(
     spawn_depth: u32,
@@ -3240,20 +3273,16 @@ fn child_runtime_inherits_speech_output_dir() {
 }
 
 #[test]
-fn emit_parent_completion_skips_grandchildren() {
+fn emit_parent_completion_fires_for_nested_child() {
     let (tx, mut rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
     let runtime = runtime_with_depth(2, Some(tx));
 
-    let sent = emit_parent_completion(&runtime, "agent_grandchild", "ignored");
+    let sent = emit_parent_completion(&runtime, "agent_grandchild", "nested summary");
 
-    assert!(
-        !sent,
-        "depth=2 grandchild must not fire on the parent channel"
-    );
-    assert!(
-        rx.try_recv().is_err(),
-        "channel should remain empty for grandchildren"
-    );
+    assert!(sent, "depth=2 child should send to its wired parent inbox");
+    let received = rx.try_recv().expect("nested completion should be routed");
+    assert_eq!(received.agent_id, "agent_grandchild");
+    assert_eq!(received.payload, "nested summary");
 }
 
 #[test]
@@ -3369,8 +3398,8 @@ async fn run_subagent_task_emits_parent_completion_before_terminal_update() {
 #[test]
 fn child_runtime_propagates_completion_tx_for_gating() {
     // The channel is cloned through `child_runtime()` so descendants carry
-    // it. The gate at the send site (`spawn_depth == 1`) is what limits
-    // who actually fires — `child_runtime` simply must not strand it.
+    // it. Running sub-agents replace the channel in the runtime handed to
+    // their nested tool registry, so this propagation must not strand it.
     let (tx, _rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
     let parent = runtime_with_depth(0, Some(tx));
 
@@ -3381,6 +3410,54 @@ fn child_runtime_propagates_completion_tx_for_gating() {
         child.parent_completion_tx.is_some(),
         "child carries the wakeup channel forward"
     );
+}
+
+#[test]
+fn nested_tool_runtime_routes_child_completions_to_local_inbox() {
+    let (root_tx, mut root_rx) = mpsc::unbounded_channel::<SubAgentCompletion>();
+    let direct_child_runtime = runtime_with_depth(1, Some(root_tx));
+    let fork_context = SubAgentForkContext {
+        system: None,
+        messages: Vec::new(),
+        structured_state_block: None,
+    };
+
+    let (tool_runtime, mut local_rx) =
+        runtime_for_nested_agent_tools(&direct_child_runtime, "agent_parent", fork_context);
+    let nested_child_runtime = tool_runtime.child_runtime();
+
+    let sent = emit_parent_completion(
+        &nested_child_runtime,
+        "agent_nested",
+        "nested child summary\n<codewhale:subagent.done>{}</codewhale:subagent.done>",
+    );
+
+    assert!(sent, "nested child should report to the local parent inbox");
+    let local = local_rx
+        .try_recv()
+        .expect("local parent inbox receives nested completion");
+    assert_eq!(local.agent_id, "agent_nested");
+    assert!(
+        root_rx.try_recv().is_err(),
+        "root engine must not receive nested child completion directly"
+    );
+}
+
+#[test]
+fn child_completion_runtime_message_preserves_agent_and_provenance_guidance() {
+    let message = child_completion_runtime_message(&[SubAgentCompletion {
+        agent_id: "agent_nested".to_string(),
+        payload: "SUMMARY\n### EVIDENCE\n- src/lib.rs:1-3".to_string(),
+    }]);
+    assert_eq!(message.role, "user");
+    let text = match &message.content[0] {
+        ContentBlock::Text { text, .. } => text,
+        other => panic!("expected text block, got {other:?}"),
+    };
+    assert!(text.contains("child_subagent_completion"));
+    assert!(text.contains("agent_id: agent_nested"));
+    assert!(text.contains("cite the child agent_id and the EVIDENCE lines"));
+    assert!(text.contains("src/lib.rs:1-3"));
 }
 
 #[test]

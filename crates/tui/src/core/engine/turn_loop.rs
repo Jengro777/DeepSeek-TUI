@@ -8,8 +8,8 @@
 use super::*;
 use crate::prompt_zones::PinnedPrefix;
 
-fn loop_guard_block_tool_result(message: String) -> ToolResult {
-    ToolResult::error(message).with_metadata(json!({"loop_guard": "identical_tool_call"}))
+fn loop_guard_block_tool_result(message: String, kind: AttemptBlockKind) -> ToolResult {
+    ToolResult::error(message).with_metadata(json!({"loop_guard": kind.as_str()}))
 }
 
 const MAX_APPROVAL_INTENT_SUMMARY_CHARS: usize = 2_000;
@@ -37,6 +37,35 @@ impl Engine {
             .lock()
             .map(|mut manager| manager.drain_finished_jobs())
             .unwrap_or_default()
+    }
+
+    async fn drain_subagent_completion_events(&mut self, status_label: &str) -> usize {
+        let mut completions: Vec<crate::tools::subagent::SubAgentCompletion> = Vec::new();
+        while let Ok(completion) = self.rx_subagent_completion.try_recv() {
+            completions.push(completion);
+        }
+
+        let count = completions.len();
+        if count == 0 {
+            return 0;
+        }
+
+        for completion in completions {
+            self.add_session_message(subagent_completion_runtime_message(&completion.payload))
+                .await;
+        }
+        let prefix = if status_label.is_empty() {
+            String::new()
+        } else {
+            format!("{status_label} ")
+        };
+        let _ = self
+            .tx_event
+            .send(Event::status(format!(
+                "Resuming turn with {count} {prefix}sub-agent completion(s)"
+            )))
+            .await;
+        count
     }
 
     pub(super) async fn handle_deepseek_turn(
@@ -107,6 +136,13 @@ impl Engine {
                     )))
                     .await;
             }
+
+            // Child agents can finish while the parent model is still taking
+            // tool steps. Surface queued completions before the next provider
+            // request so the parent can use them immediately instead of
+            // discovering them only when it eventually emits no more tools or
+            // the idle handler starts a separate follow-up turn.
+            self.drain_subagent_completion_events("queued").await;
 
             // Ensure system prompt is up to date with latest session states
             self.refresh_system_prompt();
@@ -632,10 +668,12 @@ impl Engine {
                                 }
                             }
                         }
-                        turn_error.get_or_insert(message.clone());
+                        let user_message =
+                            stream_read_error_user_message(&message, any_content_received);
+                        turn_error.get_or_insert(user_message.clone());
                         let _ = self
                             .tx_event
-                            .send(Event::error(ErrorEnvelope::classify(message, true)))
+                            .send(Event::error(ErrorEnvelope::classify(user_message, true)))
                             .await;
                         if stream_errors >= MAX_STREAM_ERRORS_BEFORE_FAIL {
                             break;
@@ -1084,11 +1122,8 @@ impl Engine {
                     continue;
                 }
 
-                let mut completions: Vec<crate::tools::subagent::SubAgentCompletion> = Vec::new();
-                while let Ok(c) = self.rx_subagent_completion.try_recv() {
-                    completions.push(c);
-                }
-                if completions.is_empty() {
+                let subagent_completions = self.drain_subagent_completion_events("").await;
+                if subagent_completions == 0 {
                     // #3216: do NOT barrier the parent on running children.
                     // Launching a sub-agent is not the same as joining it — the
                     // parent ends its turn and stays responsive. Running children
@@ -1113,18 +1148,7 @@ impl Engine {
                             .await;
                     }
                 }
-                if !completions.is_empty() {
-                    let count = completions.len();
-                    for c in completions {
-                        self.add_session_message(subagent_completion_runtime_message(&c.payload))
-                            .await;
-                    }
-                    let _ = self
-                        .tx_event
-                        .send(Event::status(format!(
-                            "Resuming turn with {count} sub-agent completion(s)"
-                        )))
-                        .await;
+                if subagent_completions > 0 {
                     turn.next_step();
                     continue;
                 }
@@ -1252,23 +1276,7 @@ impl Engine {
                     continue;
                 }
 
-                let mut late_completions: Vec<crate::tools::subagent::SubAgentCompletion> =
-                    Vec::new();
-                while let Ok(c) = self.rx_subagent_completion.try_recv() {
-                    late_completions.push(c);
-                }
-                if !late_completions.is_empty() {
-                    let count = late_completions.len();
-                    for c in late_completions {
-                        self.add_session_message(subagent_completion_runtime_message(&c.payload))
-                            .await;
-                    }
-                    let _ = self
-                        .tx_event
-                        .send(Event::status(format!(
-                            "Resuming turn with {count} late sub-agent completion(s)"
-                        )))
-                        .await;
+                if self.drain_subagent_completion_events("late").await > 0 {
                     turn.next_step();
                     continue;
                 }
@@ -1566,11 +1574,11 @@ impl Engine {
 
                 if blocked_error.is_none()
                     && guard_result.is_none()
-                    && let AttemptDecision::Block(message) =
-                        loop_guard.record_attempt(&tool_name, &tool_input)
+                    && let AttemptDecision::Block { kind, message } =
+                        loop_guard.record_attempt(&tool_name, &tool_input, read_only)
                 {
                     crate::logging::warn(message.clone());
-                    guard_result = Some(loop_guard_block_tool_result(message));
+                    guard_result = Some(loop_guard_block_tool_result(message, kind));
                 }
 
                 plans.push(ToolExecutionPlan {
@@ -2968,7 +2976,10 @@ mod tests {
 
     #[test]
     fn loop_guard_block_tool_result_counts_as_failure() {
-        let result = loop_guard_block_tool_result("Blocked: repeated call".to_string());
+        let result = loop_guard_block_tool_result(
+            "Blocked: repeated call".to_string(),
+            AttemptBlockKind::IdenticalToolCall,
+        );
 
         assert!(
             !result.success,

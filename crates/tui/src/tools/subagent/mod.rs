@@ -37,7 +37,9 @@ use crate::tools::registry::{ToolRegistry, ToolRegistryBuilder};
 use crate::tools::spec::{
     ApprovalRequirement, ToolCapability, ToolContext, ToolError, ToolResult, ToolSpec,
 };
-use crate::tools::todo::{SharedTodoList, TodoList};
+use crate::tools::todo::SharedTodoList;
+#[cfg(test)]
+use crate::tools::todo::TodoList;
 use crate::tui::app::ReasoningEffort;
 use crate::utils::spawn_supervised;
 use crate::worker_profile::{ModelRoute, ToolScope, WorkerRuntimeProfile};
@@ -622,6 +624,10 @@ pub struct SubAgentResult {
     pub status: SubAgentStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_status: Option<AgentWorkerStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run_id: Option<String>,
+    #[serde(default)]
+    pub spawn_depth: u32,
     pub result: Option<String>,
     pub steps_taken: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1326,10 +1332,12 @@ impl Default for PersistedSubAgentState {
 /// [`codewhale_config::MAX_SPAWN_DEPTH_CEILING`].
 pub const DEFAULT_MAX_SPAWN_DEPTH: u32 = codewhale_config::DEFAULT_SPAWN_DEPTH;
 
-/// Terminal-state notification emitted to the engine's parent turn loop
-/// when one of its direct children finishes (issue #756). Carries the
-/// already-rendered `<codewhale:subagent.done>` sentinel that the model
-/// expects in the transcript per `prompts/constitution.md`.
+/// Terminal-state notification emitted to the immediate parent's completion
+/// inbox when one of its children finishes (issue #756). For root-spawned
+/// agents that inbox is the engine turn loop; for nested agents it is a
+/// parent-local receiver inside `run_subagent`. Carries the already-rendered
+/// `<codewhale:subagent.done>` sentinel that the model expects in the
+/// transcript per `prompts/constitution.md`.
 #[derive(Debug, Clone)]
 pub struct SubAgentCompletion {
     /// The completing child's agent id. Held for routing/logging — the
@@ -1380,6 +1388,11 @@ pub struct SubAgentRuntime {
     /// Depth in the spawn tree. 0 = top-level user turn; 1 = direct child;
     /// etc. Children clone the parent runtime and increment this on spawn.
     pub spawn_depth: u32,
+    /// Agent id that should be recorded as parent for any child spawned
+    /// through this runtime's model-visible `agent` tool. `None` for the
+    /// root engine; set to the running sub-agent id for nested spawns so UI
+    /// surfaces can render the tree.
+    pub parent_agent_id: Option<String>,
     /// Hard cap on recursion depth. A child whose `spawn_depth + 1` would
     /// exceed this is rejected at the spawn entry. Use `>` (strictly
     /// greater than) so equality is allowed — matches codex's pattern.
@@ -1392,11 +1405,12 @@ pub struct SubAgentRuntime {
     /// whole spawn tree publishes into one ordered, fan-out-able mailbox.
     /// `None` only when no consumer is wired (legacy entry points / tests).
     pub mailbox: Option<Mailbox>,
-    /// Wakeup channel for the engine's parent turn loop (issue #756). Only
-    /// the engine's direct children fire on this — propagated to descendants
-    /// via clone but gated to `spawn_depth == 1` at the send site so the
-    /// parent isn't flooded with grandchild completions it didn't directly
-    /// orchestrate. `None` when no consumer is wired (tests / legacy paths).
+    /// Wakeup channel for this runtime's immediate parent (issue #756). For
+    /// the engine's direct children this points at the engine turn loop. While
+    /// a sub-agent is running, its tool registry swaps this for a local inbox
+    /// so nested children report to their orchestrating sub-agent instead of
+    /// flooding the root parent. `None` when no consumer is wired (tests /
+    /// legacy paths).
     pub parent_completion_tx: Option<mpsc::UnboundedSender<SubAgentCompletion>>,
     /// Snapshot of the request prefix visible to an opt-in forked child.
     pub fork_context: Option<SubAgentForkContext>,
@@ -1446,6 +1460,7 @@ impl SubAgentRuntime {
             event_tx,
             manager,
             spawn_depth: 0,
+            parent_agent_id: None,
             max_spawn_depth: DEFAULT_MAX_SPAWN_DEPTH,
             cancel_token: CancellationToken::new(),
             mailbox: None,
@@ -1494,10 +1509,10 @@ impl SubAgentRuntime {
         self
     }
 
-    /// Attach the wakeup channel so the engine's parent turn loop can resume
-    /// when this runtime's direct children finish (issue #756). The channel
-    /// is propagated to descendants via clone, but only `spawn_depth == 1`
-    /// agents fire on it — see `run_subagent_task`.
+    /// Attach the wakeup channel for this runtime's immediate parent. The
+    /// engine uses this for direct children; running sub-agents replace it in
+    /// the runtime handed to their nested `agent` tool so child completions are
+    /// routed back to the sub-agent that spawned them.
     #[must_use]
     pub fn with_parent_completion_tx(
         mut self,
@@ -1609,6 +1624,7 @@ impl SubAgentRuntime {
             event_tx: self.event_tx.clone(),
             manager: self.manager.clone(),
             spawn_depth: self.spawn_depth + 1,
+            parent_agent_id: self.parent_agent_id.clone(),
             max_spawn_depth: self.max_spawn_depth,
             cancel_token: self.cancel_token.child_token(),
             mailbox: self.mailbox.clone(),
@@ -1717,6 +1733,8 @@ impl SubAgent {
             nickname: self.nickname.clone(),
             status: self.status.clone(),
             worker_status: None,
+            parent_run_id: None,
+            spawn_depth: 0,
             result: self.result.clone(),
             steps_taken: self.steps_taken,
             checkpoint: self.checkpoint.clone(),
@@ -2364,7 +2382,7 @@ impl SubAgentManager {
         let worker_spec = AgentWorkerSpec {
             worker_id: agent_id.clone(),
             run_id: agent_id.clone(),
-            parent_run_id: None,
+            parent_run_id: runtime.parent_agent_id.clone(),
             session_name: Some(agent.session_name.clone()),
             objective: assignment.objective.clone(),
             role: assignment.role.clone(),
@@ -2466,10 +2484,14 @@ impl SubAgentManager {
     fn snapshot_for_listing(&self, agent: &SubAgent) -> SubAgentResult {
         let mut snap = agent.snapshot();
         snap.from_prior_session = self.is_from_prior_session(agent);
-        snap.worker_status = self
-            .worker_records
-            .get(&agent.id)
-            .map(|record| record.status);
+        if let Some(record) = self.worker_records.get(&agent.id) {
+            snap.worker_status = Some(record.status);
+            snap.parent_run_id = record
+                .parent_run_id
+                .clone()
+                .or_else(|| record.spec.parent_run_id.clone());
+            snap.spawn_depth = record.spec.spawn_depth;
+        }
         snap
     }
 
@@ -3100,6 +3122,14 @@ async fn spawn_subagent_from_input(
         )));
     }
 
+    if let Some(remaining) = crate::retry_status::rate_limit_remaining() {
+        let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+        return Err(ToolError::execution_failed(format!(
+            "Provider is rate-limiting; sub-agent spawning is paused for {seconds}s. \
+             Wait for the current backoff window before starting new agent work."
+        )));
+    }
+
     let validated_cwd = if let Some(requested_cwd) = spawn_request.cwd.as_ref() {
         let parent_workspace = &runtime.context.workspace;
         let resolved = if requested_cwd.is_absolute() {
@@ -3486,18 +3516,19 @@ async fn record_queued_launch_progress(task: &SubAgentTask) {
     );
 }
 
-/// Notify the engine's parent turn loop that a direct child finished
-/// (issue #756). Returns `true` if a send was attempted, `false` if the
-/// notification was skipped because this isn't a direct child or no channel
-/// is wired. Skips silently when the channel sender has no receiver — the
-/// engine outlives the runtime, so a dropped receiver means we're shutting
-/// down anyway.
+/// Notify this runtime's immediate parent that the child finished (issue
+/// #756). Root-spawned children send to the engine turn loop. Nested children
+/// send to the parent sub-agent's local inbox, which is swapped into the
+/// runtime used by that parent's `agent` tool. Returns `true` if a send was
+/// attempted, `false` if this is the engine itself or no channel is wired.
+/// Skips silently when the channel sender has no receiver — the receiver may
+/// have ended because the parent turn/agent already completed.
 pub(crate) fn emit_parent_completion(
     runtime: &SubAgentRuntime,
     agent_id: &str,
     payload: &str,
 ) -> bool {
-    if runtime.spawn_depth != 1 {
+    if runtime.spawn_depth == 0 {
         return false;
     }
     let Some(tx) = runtime.parent_completion_tx.as_ref() else {
@@ -3691,6 +3722,61 @@ fn record_agent_progress(runtime: &SubAgentRuntime, agent_id: &str, message: imp
     );
 }
 
+fn runtime_for_nested_agent_tools(
+    runtime: &SubAgentRuntime,
+    parent_agent_id: &str,
+    fork_context: SubAgentForkContext,
+) -> (SubAgentRuntime, mpsc::UnboundedReceiver<SubAgentCompletion>) {
+    let (child_completion_tx, child_completion_rx) =
+        mpsc::unbounded_channel::<SubAgentCompletion>();
+    let runtime_for_tools = runtime
+        .clone()
+        .with_parent_completion_tx(child_completion_tx)
+        .with_fork_context(fork_context);
+    let runtime_for_tools = SubAgentRuntime {
+        parent_agent_id: Some(parent_agent_id.to_string()),
+        ..runtime_for_tools
+    };
+    (runtime_for_tools, child_completion_rx)
+}
+
+fn drain_child_completion_events(
+    child_completion_rx: &mut mpsc::UnboundedReceiver<SubAgentCompletion>,
+) -> Vec<SubAgentCompletion> {
+    let mut completions = Vec::new();
+    while let Ok(completion) = child_completion_rx.try_recv() {
+        completions.push(completion);
+    }
+    completions
+}
+
+fn child_completion_runtime_message(completions: &[SubAgentCompletion]) -> Message {
+    let mut text = String::from(
+        "<codewhale:runtime_event kind=\"child_subagent_completion\" visibility=\"internal\">\n\
+This is an internal runtime event, not user input. One or more child sub-agents \
+you spawned have finished. Treat each child summary as an unverified self-report: \
+if you rely on it, cite the child agent_id and the EVIDENCE lines it provided, \
+and distinguish that from evidence you personally verified.\n",
+    );
+    for completion in completions {
+        text.push_str("\n--- child sub-agent completion ---\n");
+        text.push_str("agent_id: ");
+        text.push_str(&completion.agent_id);
+        text.push('\n');
+        text.push_str(&completion.payload);
+        text.push('\n');
+    }
+    text.push_str("</codewhale:runtime_event>");
+
+    Message {
+        role: "user".to_string(),
+        content: vec![ContentBlock::Text {
+            text,
+            cache_control: None,
+        }],
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn run_subagent(
     runtime: &SubAgentRuntime,
@@ -3712,11 +3798,15 @@ async fn run_subagent(
     let request_system = subagent_request_system_prompt(&system_prompt, fork_context);
     let mut messages =
         build_initial_subagent_messages(&prompt, &assignment, &agent_type, fork_context);
-    let runtime_for_tools = runtime.clone().with_fork_context(SubAgentForkContext {
-        system: Some(request_system.clone()),
-        messages: messages.clone(),
-        structured_state_block: None,
-    });
+    let (runtime_for_tools, mut child_completion_rx) = runtime_for_nested_agent_tools(
+        runtime,
+        &agent_id,
+        SubAgentForkContext {
+            system: Some(request_system.clone()),
+            messages: messages.clone(),
+            structured_state_block: None,
+        },
+    );
     let tool_registry = SubAgentToolRegistry::new(
         runtime_for_tools,
         agent_type.clone(),
@@ -3799,6 +3889,8 @@ async fn run_subagent(
                 nickname: None,
                 status,
                 worker_status: None,
+                parent_run_id: runtime.parent_agent_id.clone(),
+                spawn_depth: runtime.spawn_depth,
                 result: None,
                 steps_taken: steps,
                 checkpoint: latest_checkpoint.clone(),
@@ -3835,6 +3927,20 @@ async fn run_subagent(
                     }],
                 });
             }
+        }
+
+        let child_completions = drain_child_completion_events(&mut child_completion_rx);
+        if !child_completions.is_empty() {
+            let count = child_completions.len();
+            record_agent_progress(
+                runtime,
+                &agent_id,
+                format!(
+                    "{}: received {count} child sub-agent completion(s)",
+                    format_step_counter(steps, max_steps)
+                ),
+            );
+            messages.push(child_completion_runtime_message(&child_completions));
         }
 
         let request = MessageRequest {
@@ -3908,6 +4014,8 @@ async fn run_subagent(
                     nickname: None,
                     status,
                     worker_status: None,
+                    parent_run_id: runtime.parent_agent_id.clone(),
+                    spawn_depth: runtime.spawn_depth,
                     result: None,
                     steps_taken: steps,
                     checkpoint: latest_checkpoint.clone(),
@@ -4068,6 +4176,31 @@ async fn run_subagent(
         reset_truncated_subagent_responses(&mut consecutive_truncated_responses);
 
         if tool_uses.is_empty() {
+            let child_completions = drain_child_completion_events(&mut child_completion_rx);
+            if !child_completions.is_empty() {
+                let count = child_completions.len();
+                record_agent_progress(
+                    runtime,
+                    &agent_id,
+                    format!(
+                        "{}: resuming with {count} child sub-agent completion(s)",
+                        format_step_counter(steps, max_steps)
+                    ),
+                );
+                messages.push(child_completion_runtime_message(&child_completions));
+                latest_checkpoint = Some(
+                    checkpoint_subagent_progress(
+                        runtime,
+                        &agent_id,
+                        "after_tail_child_subagent_completion",
+                        &messages,
+                        steps,
+                        true,
+                    )
+                    .await,
+                );
+                continue;
+            }
             while let Ok(input) = input_rx.try_recv() {
                 if input.interrupt {
                     pending_inputs.clear();
@@ -4211,6 +4344,8 @@ async fn run_subagent(
         nickname: None,
         status,
         worker_status: None,
+        parent_run_id: runtime.parent_agent_id.clone(),
+        spawn_depth: runtime.spawn_depth,
         result: final_result,
         steps_taken: steps,
         checkpoint: latest_checkpoint,

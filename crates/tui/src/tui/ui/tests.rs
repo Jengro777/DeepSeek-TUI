@@ -3938,6 +3938,8 @@ fn make_subagent(
         nickname: None,
         status,
         worker_status: None,
+        parent_run_id: None,
+        spawn_depth: 0,
         result: None,
         steps_taken: 0,
         checkpoint: None,
@@ -9103,6 +9105,25 @@ fn render_footer_from_with_empty_items_blanks_every_segment() {
     assert!(props.cost.is_empty());
     assert!(props.agents.is_empty());
     assert!(props.cache.is_empty());
+}
+
+#[test]
+fn render_footer_from_surfaces_background_shell_even_without_tasks_panel() {
+    let mut app = create_test_app();
+    app.task_panel = vec![crate::tui::app::TaskPanelEntry {
+        id: "shell_abc".to_string(),
+        status: "running".to_string(),
+        prompt_summary: "shell: cargo test -p codewhale-tui".to_string(),
+        duration_ms: Some(5_000),
+        kind: crate::tui::app::TaskPanelEntryKind::Background,
+        stale: false,
+        elapsed_since_output_ms: None,
+    }];
+
+    let props = render_footer_from(&app, &[], None);
+    let shell = spans_text(&props.cache);
+    assert!(shell.contains("shell bg:"), "{shell}");
+    assert!(shell.contains("cargo test"), "{shell}");
 }
 
 #[test]

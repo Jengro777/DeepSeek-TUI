@@ -1725,6 +1725,15 @@ pub struct SubagentsConfig {
     /// setting. Clamped to [1, MAX_SUBAGENTS].
     #[serde(default)]
     pub max_concurrent: Option<usize>,
+    /// How many levels of nested sub-agents the interactive `agent` tool may
+    /// spawn. `0` disables sub-agents entirely — the `agent` tool refuses to
+    /// spawn, a full opt-out; `1` allows one level, `2` two, and so on. When
+    /// unset, defaults to [`codewhale_config::DEFAULT_SPAWN_DEPTH`]; any value
+    /// is clamped to [`codewhale_config::MAX_SPAWN_DEPTH_CEILING`]. Fleet
+    /// workers are governed separately by `[fleet.exec] max_spawn_depth`; both
+    /// share the same default and ceiling so the limit cannot drift.
+    #[serde(default)]
+    pub max_depth: Option<u32>,
     /// Number of direct (depth-1) sub-agents that may execute concurrently
     /// before further launches queue for a launch slot (#3095). When unset,
     /// defaults to the full resolved `max_subagents()` (no artificial
@@ -3221,6 +3230,21 @@ impl Config {
         self.max_subagents
             .unwrap_or(DEFAULT_MAX_SUBAGENTS)
             .clamp(1, MAX_SUBAGENTS)
+    }
+
+    /// How many levels of nested sub-agents the interactive `agent` tool may
+    /// spawn. Reads `[subagents] max_depth`; when unset it defaults to
+    /// [`codewhale_config::DEFAULT_SPAWN_DEPTH`]. `0` is a valid value that
+    /// disables sub-agent spawning entirely (full opt-out). Any value is
+    /// clamped to [`codewhale_config::MAX_SPAWN_DEPTH_CEILING`] so the
+    /// operator's choice can never exceed the hard recursion ceiling.
+    #[must_use]
+    pub fn subagent_max_spawn_depth(&self) -> u32 {
+        self.subagents
+            .as_ref()
+            .and_then(|cfg| cfg.max_depth)
+            .unwrap_or(codewhale_config::DEFAULT_SPAWN_DEPTH)
+            .min(codewhale_config::MAX_SPAWN_DEPTH_CEILING)
     }
 
     /// Number of direct (depth-1) sub-agents that may execute concurrently
@@ -7406,6 +7430,35 @@ action = "session.compact"
             ..Config::default()
         };
         assert_eq!(high.max_subagents(), MAX_SUBAGENTS);
+    }
+
+    #[test]
+    fn subagent_max_spawn_depth_defaults_allows_zero_and_clamps() {
+        assert_eq!(
+            Config::default().subagent_max_spawn_depth(),
+            codewhale_config::DEFAULT_SPAWN_DEPTH
+        );
+
+        let disabled = Config {
+            subagents: Some(SubagentsConfig {
+                max_depth: Some(0),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(disabled.subagent_max_spawn_depth(), 0);
+
+        let high = Config {
+            subagents: Some(SubagentsConfig {
+                max_depth: Some(codewhale_config::MAX_SPAWN_DEPTH_CEILING + 10),
+                ..SubagentsConfig::default()
+            }),
+            ..Config::default()
+        };
+        assert_eq!(
+            high.subagent_max_spawn_depth(),
+            codewhale_config::MAX_SPAWN_DEPTH_CEILING
+        );
     }
 
     #[test]

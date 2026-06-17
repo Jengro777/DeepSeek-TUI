@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.62] - 2026-06-17
+
+### Runtime guardrails
+
+- Tool persistence is now sufficiency-first: additional lookup/search/read or
+  delegation calls must target a missing fact, and agents are instructed to
+  answer with limits instead of broadening searches indefinitely.
+- The per-turn loop guard blocks duplicate read-only/delegated calls earlier
+  and caps repeated broad lookup/delegation loops with a synthesis-forcing tool
+  error.
+
+### Sub-agents
+
+- Direct sub-agent completions are drained before the next parent model request,
+  and nested sub-agents report to their immediate parent inbox without flooding
+  the main model with grandchild completions.
+- The sidebar orders sub-agents as a parent/child tree and annotates nested rows
+  with parent/depth hover metadata.
+- Sub-agent output guidance now requires child-agent provenance when a sub-agent
+  relies on a child report.
+
+### TUI polish
+
+- The empty-startup welcome block is centered by the actual rendered text width.
+- Streaming HTTP body read errors now explain retry/no-replay behavior based on
+  whether any output had already streamed.
+
 ### Retroactive credits
 
 A credit-reconciliation pass found shipped community fixes that were never

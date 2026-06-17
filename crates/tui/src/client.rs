@@ -1044,6 +1044,9 @@ impl DeepSeekClient {
             || {
                 let request = build();
                 async move {
+                    while let Some(delay) = crate::retry_status::rate_limit_remaining() {
+                        tokio::time::sleep(delay).await;
+                    }
                     self.wait_for_rate_limit().await;
                     let response = request
                         .send()
@@ -1075,6 +1078,9 @@ impl DeepSeekClient {
                     attempt + 1,
                     delay.as_secs_f64(),
                 ));
+                if matches!(err, LlmError::RateLimited { .. }) {
+                    crate::retry_status::note_rate_limit(delay);
+                }
                 crate::retry_status::start(attempt + 1, delay, human_reason);
             })),
         )
@@ -1087,6 +1093,12 @@ impl DeepSeekClient {
                 Ok(response)
             }
             Err(err) => {
+                if let LlmError::RateLimited { retry_after, .. } = &err.last_error {
+                    crate::retry_status::note_rate_limit(
+                        retry_after
+                            .unwrap_or_else(|| retry_cfg.delay_for_attempt(retry_cfg.max_retries)),
+                    );
+                }
                 let last = err.last_error.to_string();
                 if err.attempts > 1 {
                     crate::retry_status::failed(last.clone());

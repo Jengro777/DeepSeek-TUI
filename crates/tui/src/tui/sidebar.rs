@@ -2181,6 +2181,8 @@ pub struct SidebarSubagentSummary {
 #[derive(Debug, Clone)]
 pub struct SidebarAgentRow {
     pub id: String,
+    pub parent_run_id: Option<String>,
+    pub spawn_depth: u32,
     pub name: String,
     pub role: String,
     pub status: String,
@@ -2232,6 +2234,8 @@ fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                 .unwrap_or_else(|| agent.name.clone());
             SidebarAgentRow {
                 id: agent.agent_id.clone(),
+                parent_run_id: agent.parent_run_id.clone(),
+                spawn_depth: agent.spawn_depth,
                 name: display_name,
                 role: agent.agent_type.as_str().to_string(),
                 status: agent
@@ -2267,6 +2271,8 @@ fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
                     .unwrap_or_else(|| id.clone());
                 SidebarAgentRow {
                     id: id.clone(),
+                    parent_run_id: None,
+                    spawn_depth: 0,
                     name: display_name,
                     role: "agent".to_string(),
                     status: sidebar_progress_status_text(progress).to_string(),
@@ -2281,7 +2287,53 @@ fn sidebar_agent_rows(app: &App) -> Vec<SidebarAgentRow> {
             }),
     );
 
-    rows
+    sort_sidebar_agent_rows_as_tree(rows)
+}
+
+fn sort_sidebar_agent_rows_as_tree(rows: Vec<SidebarAgentRow>) -> Vec<SidebarAgentRow> {
+    let known_ids: std::collections::HashSet<String> =
+        rows.iter().map(|row| row.id.clone()).collect();
+    let mut children: std::collections::HashMap<String, Vec<usize>> =
+        std::collections::HashMap::new();
+    let mut roots = Vec::new();
+
+    for (idx, row) in rows.iter().enumerate() {
+        if let Some(parent) = row.parent_run_id.as_deref()
+            && known_ids.contains(parent)
+        {
+            children.entry(parent.to_string()).or_default().push(idx);
+            continue;
+        }
+        roots.push(idx);
+    }
+
+    fn push_tree(
+        idx: usize,
+        rows: &[SidebarAgentRow],
+        children: &std::collections::HashMap<String, Vec<usize>>,
+        seen: &mut std::collections::HashSet<usize>,
+        out: &mut Vec<SidebarAgentRow>,
+    ) {
+        if !seen.insert(idx) {
+            return;
+        }
+        out.push(rows[idx].clone());
+        if let Some(child_indices) = children.get(&rows[idx].id) {
+            for child_idx in child_indices {
+                push_tree(*child_idx, rows, children, seen, out);
+            }
+        }
+    }
+
+    let mut out = Vec::with_capacity(rows.len());
+    let mut seen = std::collections::HashSet::new();
+    for idx in roots {
+        push_tree(idx, &rows, &children, &mut seen, &mut out);
+    }
+    for idx in 0..rows.len() {
+        push_tree(idx, &rows, &children, &mut seen, &mut out);
+    }
+    out
 }
 
 fn subagent_status_text(status: &SubAgentStatus) -> &'static str {
@@ -2414,7 +2466,8 @@ fn subagent_panel_rows(
             break;
         }
         let (marker, color) = agent_status_marker(row.status.as_str(), theme);
-        let label = format!("{marker} {} {}", row.role, row.name);
+        let tree_prefix = agent_tree_prefix(row);
+        let label = format!("{tree_prefix}{marker} {} {}", row.role, row.name);
         lines.push(Line::from(Span::styled(
             truncate_line_to_width(&label, content_width.max(1)),
             Style::default().fg(color),
@@ -2476,6 +2529,14 @@ fn subagent_panel_rows(
 
     debug_assert_eq!(lines.len(), actions.len());
     (lines, actions)
+}
+
+fn agent_tree_prefix(row: &SidebarAgentRow) -> String {
+    if row.parent_run_id.is_none() && row.spawn_depth <= 1 {
+        return String::new();
+    }
+    let depth = row.spawn_depth.max(2).saturating_sub(2).min(6);
+    format!("{}└─ ", "  ".repeat(depth as usize))
 }
 
 fn subagent_panel_hover_texts(
@@ -2566,8 +2627,20 @@ fn subagent_panel_hover_texts(
 /// without spamming raw ids into the normal view.
 fn agent_row_hover_text(row: &SidebarAgentRow) -> String {
     let (marker, _) = agent_status_marker(row.status.as_str(), &palette::UI_THEME);
-    let mut text = format!("{marker} {} {}", row.role, row.name);
+    let mut text = format!(
+        "{}{} {} {}",
+        agent_tree_prefix(row),
+        marker,
+        row.role,
+        row.name
+    );
     let _ = write!(text, "\nid: {}", row.id);
+    if let Some(parent) = row.parent_run_id.as_deref() {
+        let _ = write!(text, "\nparent: {parent}");
+    }
+    if row.spawn_depth > 0 {
+        let _ = write!(text, "\ndepth: {}", row.spawn_depth);
+    }
     let mut status_line = format!("status: {}", row.status);
     if let Some(duration) = row.duration_ms {
         let _ = write!(status_line, " · elapsed {}", format_duration_ms(duration));
@@ -2890,11 +2963,12 @@ mod tests {
         ACTIVE_TOOL_COMPLETED_ROW_TTL, ACTIVE_TOOL_STALE_RUNNING_ROW_TTL, AutoSidebarPanel,
         AutoSidebarState, SidebarAgentRow, SidebarHoverRow, SidebarHoverSection, SidebarHoverState,
         SidebarSubagentSummary, SidebarToolRow, SidebarWorkChecklistItem, SidebarWorkStrategyStep,
-        SidebarWorkSummary, ToolRowOrder, auto_sidebar_panels, context_panel_cost_line,
-        editorial_tool_rows, normalize_activity_text, sidebar_agent_rows, sidebar_hover_rows,
-        sidebar_work_summary, subagent_panel_hover_texts, subagent_panel_lines,
-        subagent_panel_rows, task_panel_hover_texts, task_panel_lines, task_panel_rows,
-        work_panel_empty_hint, work_panel_hover_texts, work_panel_lines,
+        SidebarWorkSummary, ToolRowOrder, agent_row_hover_text, auto_sidebar_panels,
+        context_panel_cost_line, editorial_tool_rows, normalize_activity_text, sidebar_agent_rows,
+        sidebar_hover_rows, sidebar_work_summary, sort_sidebar_agent_rows_as_tree,
+        subagent_panel_hover_texts, subagent_panel_lines, subagent_panel_rows,
+        task_panel_hover_texts, task_panel_lines, task_panel_rows, work_panel_empty_hint,
+        work_panel_hover_texts, work_panel_lines,
     };
     use crate::config::Config;
     use crate::palette;
@@ -4039,6 +4113,8 @@ mod tests {
         };
         let rows = vec![SidebarAgentRow {
             id: "agent_0123456789".to_string(),
+            parent_run_id: None,
+            spawn_depth: 1,
             name: "investigator".to_string(),
             role: "worker".to_string(),
             status: "running".to_string(),
@@ -4077,6 +4153,8 @@ mod tests {
         };
         let rows = vec![SidebarAgentRow {
             id: "agent_fedcba987654".to_string(),
+            parent_run_id: None,
+            spawn_depth: 1,
             name: "scout".to_string(),
             role: "explorer".to_string(),
             status: "running".to_string(),
@@ -4101,6 +4179,69 @@ mod tests {
             "no role-mix line should be emitted without role counts: {text:?}"
         );
         assert_eq!(actions[agent_idx].as_deref(), Some("/subagents"));
+    }
+
+    #[test]
+    fn subagent_sidebar_orders_and_indents_nested_children() {
+        let rows = vec![
+            SidebarAgentRow {
+                id: "agent_grandchild".to_string(),
+                parent_run_id: Some("agent_parent".to_string()),
+                spawn_depth: 2,
+                name: "nested-reader".to_string(),
+                role: "explore".to_string(),
+                status: "done".to_string(),
+                objective: None,
+                git_branch: None,
+                progress: None,
+                steps_taken: 1,
+                duration_ms: Some(250),
+            },
+            SidebarAgentRow {
+                id: "agent_parent".to_string(),
+                parent_run_id: None,
+                spawn_depth: 1,
+                name: "nested-parent".to_string(),
+                role: "explore".to_string(),
+                status: "running".to_string(),
+                objective: None,
+                git_branch: None,
+                progress: Some("waiting on child".to_string()),
+                steps_taken: 2,
+                duration_ms: Some(500),
+            },
+        ];
+        let sorted = sort_sidebar_agent_rows_as_tree(rows);
+        assert_eq!(sorted[0].id, "agent_parent");
+        assert_eq!(sorted[1].id, "agent_grandchild");
+
+        let summary = SidebarSubagentSummary {
+            cached_total: 2,
+            cached_running: 1,
+            ..SidebarSubagentSummary::default()
+        };
+        let (lines, _) = subagent_panel_rows(&summary, &sorted, 64, 8, &palette::UI_THEME);
+        let text = lines_to_text(&lines);
+        let parent_idx = text
+            .iter()
+            .position(|line| line.contains("nested-parent"))
+            .expect("parent row");
+        let child_idx = text
+            .iter()
+            .position(|line| line.contains("nested-reader"))
+            .expect("child row");
+        assert!(
+            parent_idx < child_idx,
+            "parent must render before child: {text:?}"
+        );
+        assert!(
+            text[child_idx].contains("└─"),
+            "nested child should render with a tree branch marker: {text:?}"
+        );
+
+        let hover = agent_row_hover_text(&sorted[1]);
+        assert!(hover.contains("parent: agent_parent"));
+        assert!(hover.contains("depth: 2"));
     }
 
     #[test]
@@ -4405,6 +4546,8 @@ mod tests {
         let rows = vec![
             SidebarAgentRow {
                 id: "agent_a5e674dc".to_string(),
+                parent_run_id: None,
+                spawn_depth: 1,
                 name: "check-docs-mcp".to_string(),
                 role: "explore".to_string(),
                 status: "running".to_string(),
@@ -4416,6 +4559,8 @@ mod tests {
             },
             SidebarAgentRow {
                 id: "agent_850aa63f".to_string(),
+                parent_run_id: None,
+                spawn_depth: 1,
                 name: "check-install-docs".to_string(),
                 role: "general".to_string(),
                 status: "done".to_string(),
@@ -4694,6 +4839,8 @@ mod tests {
             "currently reviewing sidebar hover popover wrapping and hitbox metadata";
         let rows = vec![SidebarAgentRow {
             id: long_id.to_string(),
+            parent_run_id: None,
+            spawn_depth: 1,
             name: "sidebar-detail-worker-with-long-name".to_string(),
             role: "worker".to_string(),
             status: "running".to_string(),
@@ -4727,6 +4874,8 @@ mod tests {
         };
         let rows = vec![SidebarAgentRow {
             id: "019e9142-83f6-7713-87f1-28902e74bf05".to_string(),
+            parent_run_id: None,
+            spawn_depth: 1,
             name: "doc-checker".to_string(),
             role: "worker".to_string(),
             status: "running".to_string(),
@@ -4838,6 +4987,8 @@ mod tests {
             nickname: nickname.map(str::to_string),
             status: crate::tools::subagent::SubAgentStatus::Running,
             worker_status: None,
+            parent_run_id: None,
+            spawn_depth: 0,
             result: None,
             steps_taken: 1,
             checkpoint: None,

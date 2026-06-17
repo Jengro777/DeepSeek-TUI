@@ -3169,7 +3169,7 @@ use self::dispatch::{
     mcp_tool_is_read_only, parse_parallel_tool_calls, parse_tool_input,
     plan_tool_execution_batches, should_force_update_plan_first, should_stop_after_plan_tool,
 };
-use self::loop_guard::{AttemptDecision, LoopGuard, OutcomeDecision};
+use self::loop_guard::{AttemptBlockKind, AttemptDecision, LoopGuard, OutcomeDecision};
 #[cfg(test)]
 use self::lsp_hooks::edited_paths_for_tool;
 #[cfg(test)]
@@ -3178,7 +3178,7 @@ use self::streaming::{
     ContentBlockKind, FAKE_WRAPPER_NOTICE, MAX_STREAM_ERRORS_BEFORE_FAIL, MAX_STREAM_RETRIES,
     MAX_TRANSPARENT_STREAM_RETRIES, STREAM_MAX_CONTENT_BYTES, STREAM_MAX_DURATION_SECS,
     ToolUseState, contains_fake_tool_wrapper, filter_tool_call_delta, should_resume_after_sleep,
-    should_transparently_retry_stream, sleep_gap_detected,
+    should_transparently_retry_stream, sleep_gap_detected, stream_read_error_user_message,
 };
 use self::tool_catalog::{
     CODE_EXECUTION_TOOL_NAME, JS_EXECUTION_TOOL_NAME, MULTI_TOOL_PARALLEL_NAME,

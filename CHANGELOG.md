@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.62] - 2026-06-17
+
 ### Default model + sub-agent routing
 
 - **GLM-5.2 is now the default direct Z.AI model.** `DEFAULT_ZAI_MODEL` resolves
@@ -35,6 +37,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   architecture, integration, and final verification in the parent. The
   delegate skill examples now use provider-neutral `model_strength` instead of
   hardcoded DeepSeek model ids.
+
+### Agent synthesis guardrails
+
+- The base constitution now frames tools around sufficient evidence rather than
+  open-ended persistence: extra reads, searches, and delegation must target a
+  missing fact, and agents should answer with limits instead of broadening
+  searches indefinitely.
+- The runtime loop guard now blocks duplicate read-only/delegated calls earlier
+  and caps repeated broad lookup/delegation loops in a single turn with a
+  synthesis-forcing tool error. Guard metadata distinguishes exact duplicates
+  (`identical_tool_call`) from no-progress loops (`no_progress_tool_loop`).
+
+### Sub-agent handoff and visibility
+
+- Direct sub-agent completions are drained before the next parent model request,
+  so finished children can wake the main model promptly instead of waiting for
+  an empty-tool-use branch or idle engine path.
+- Nested sub-agents now report completions to their immediate parent inbox. The
+  main model still receives only direct-child completions, avoiding grandchild
+  floods while preserving nested evidence flow.
+- Sub-agent output guidance now requires child-agent provenance when a sub-agent
+  relies on a child report: cite the child `agent_id` and the child's EVIDENCE
+  line(s), and do not present child findings as directly verified facts.
+- The sidebar orders sub-agents as a parent/child tree and annotates nested rows
+  with parent and depth information in hover text.
+
+### TUI polish
+
+- The empty-startup welcome block is centered by the actual rendered text width,
+  fixing the off-center layout left over from the old sidebar-oriented welcome
+  composition.
+- Streaming HTTP body read errors now explain whether CodeWhale can retry before
+  output, or is surfacing a warning after partial output to avoid replaying and
+  duplicating streamed text.
 
 ### Agent clarification questions (#3102)
 
@@ -73,10 +109,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   columns or corrupt selection. Supporting terminals get live hyperlinks;
   others see the label text unchanged. Clipboard/selection extraction strips
   residual codes as defense-in-depth.
-
-> Note: the workspace version is intentionally still `0.8.61`. A full version
-> bump to `0.8.62` is deferred until the routing change is smoke-tested end to
-> end against the live Z.ai and OpenRouter endpoints.
 
 ### Retroactive credits
 
@@ -2142,7 +2174,8 @@ overflow report and `/theme` picker edge-wrapping patch in #1814.
 
 Older releases (v0.8.39 and earlier) are archived in [docs/CHANGELOG_ARCHIVE.md](docs/CHANGELOG_ARCHIVE.md).
 
-[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.60...HEAD
+[Unreleased]: https://github.com/Hmbown/CodeWhale/compare/v0.8.62...HEAD
+[0.8.62]: https://github.com/Hmbown/CodeWhale/compare/v0.8.61...v0.8.62
 [0.8.61]: https://github.com/Hmbown/CodeWhale/compare/v0.8.60...v0.8.61
 [0.8.60]: https://github.com/Hmbown/CodeWhale/compare/v0.8.59...v0.8.60
 [0.8.59]: https://github.com/Hmbown/CodeWhale/compare/v0.8.58...v0.8.59

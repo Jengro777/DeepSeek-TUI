@@ -16,7 +16,7 @@ mod renderable;
 pub mod tool_card;
 
 pub use footer::{
-    FooterProps, FooterToast, FooterWidget, footer_agents_chip, footer_shell_chip,
+    FooterProps, FooterToast, FooterWidget, footer_agents_chip, footer_shell_label_chip,
     footer_working_label,
 };
 pub use header::{HeaderData, HeaderWidget, header_status_indicator_frame};
@@ -2146,22 +2146,29 @@ fn build_empty_state_lines(app: &App, area: Rect) -> Vec<Line<'static>> {
     }
 
     let workspace = crate::utils::display_path(&app.workspace);
-    let body_width = usize::from(area.width.saturating_sub(8).clamp(24, 72));
-    let left_padding = usize::from(area.width.saturating_sub(body_width as u16) / 2);
+    let title = format!(">_ codewhale (v{})", env!("CARGO_PKG_VERSION"));
+    let model = format!("model: {}  /model to switch", app.model);
+    let directory = format!("directory: {workspace}");
+    let block_width = [&title, &model, &directory]
+        .into_iter()
+        .map(|line| UnicodeWidthStr::width(line.as_str()))
+        .max()
+        .unwrap_or(0);
+    let left_padding = usize::from(area.width).saturating_sub(block_width) / 2;
     let inset = " ".repeat(left_padding);
 
     let body = vec![
         Line::from(Span::styled(
-            format!("{inset}>_ codewhale (v{})", env!("CARGO_PKG_VERSION")),
+            format!("{inset}{title}"),
             Style::default().fg(palette::WHALE_ACCENT_PRIMARY).bold(),
         )),
         Line::from(""),
         Line::from(Span::styled(
-            format!("{inset}model: {}  /model to switch", app.model),
+            format!("{inset}{model}"),
             Style::default().fg(palette::TEXT_MUTED),
         )),
         Line::from(Span::styled(
-            format!("{inset}directory: {workspace}"),
+            format!("{inset}{directory}"),
             Style::default().fg(palette::TEXT_MUTED),
         )),
     ];
@@ -3757,6 +3764,39 @@ mod tests {
         assert!(rendered.contains(&format!(">_ codewhale (v{})", env!("CARGO_PKG_VERSION"))));
         assert!(rendered.contains("model: deepseek-v4-pro  /model to switch"));
         assert!(rendered.contains("directory: /tmp/codewhale-test-workspace"));
+    }
+
+    #[test]
+    fn empty_state_centers_startup_block_by_actual_text_width() {
+        let mut app = create_test_app();
+        app.workspace = PathBuf::from("/tmp/codewhale-test-workspace");
+        app.model = "deepseek-v4-pro".to_string();
+
+        let lines = build_empty_state_lines(&app, Rect::new(0, 0, 100, 20));
+        let text_lines = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        let title = format!(">_ codewhale (v{})", env!("CARGO_PKG_VERSION"));
+        let model = "model: deepseek-v4-pro  /model to switch";
+        let directory = "directory: /tmp/codewhale-test-workspace";
+        let block_width = [title.as_str(), model, directory]
+            .into_iter()
+            .map(UnicodeWidthStr::width)
+            .max()
+            .expect("startup block has lines");
+        let expected_padding = (100usize - block_width) / 2;
+        let actual_padding = text_lines[2].chars().take_while(|ch| *ch == ' ').count();
+
+        assert_eq!(actual_padding, expected_padding);
+        assert_eq!(text_lines[2].trim_start(), title);
+        assert_eq!(text_lines[4].trim_start(), model);
+        assert_eq!(text_lines[5].trim_start(), directory);
     }
 
     /// Probe: confirm `cell.lines_with_motion` returns no Line whose total

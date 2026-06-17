@@ -3502,6 +3502,36 @@ fn stream_retry_after_content_received_surfaces_error() {
 }
 
 #[test]
+fn stream_read_error_message_explains_retry_before_output() {
+    let message = super::stream_read_error_user_message(
+        "Stream read error: error decoding response body",
+        false,
+    );
+
+    assert!(message.contains("Provider stream connection dropped"));
+    assert!(message.contains("No output had streamed yet"));
+    assert!(message.contains("retry automatically"));
+    assert!(message.contains("Stream read error: error decoding response body"));
+}
+
+#[test]
+fn stream_read_error_message_explains_no_replay_after_output() {
+    let message = super::stream_read_error_user_message(
+        "Stream read error: error decoding response body",
+        true,
+    );
+
+    assert!(message.contains("Provider stream connection dropped"));
+    assert!(message.contains("Some output had already streamed"));
+    assert!(message.contains("risking duplicated output"));
+    assert!(message.contains("Stream read error: error decoding response body"));
+    assert_eq!(
+        crate::error_taxonomy::classify_error_message(&message),
+        crate::error_taxonomy::ErrorCategory::Network
+    );
+}
+
+#[test]
 fn stream_retry_budget_caps_transparent_retries_at_two() {
     // Case 4 from issue #103: after MAX_TRANSPARENT_STREAM_RETRIES attempts
     // we stop trying transparently and let the outer error path surface.

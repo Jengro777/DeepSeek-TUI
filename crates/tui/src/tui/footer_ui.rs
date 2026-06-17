@@ -6,7 +6,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::localization::{Locale, MessageId};
 use crate::palette;
 use crate::tools::subagent::SubAgentStatus;
-use crate::tui::app::App;
+use crate::tui::app::{App, TaskPanelEntryKind};
 use crate::tui::format_helpers;
 use crate::tui::history::{HistoryCell, ToolCell, ToolStatus, summarize_tool_output};
 use crate::tui::key_shortcuts;
@@ -641,9 +641,9 @@ pub(crate) fn render_footer_from(
         props.model.clear();
     }
 
-    // Shell-running chip: visible whenever a foreground shell command is
-    // active, regardless of user-configured status items.
-    let shell_chip = crate::tui::widgets::footer_shell_chip(active_foreground_shell_running(app));
+    // Shell-running chip: visible whenever foreground or background shell work
+    // is active, regardless of user-configured status items.
+    let shell_chip = footer_shell_spans(app);
 
     // Right-cluster extension chips: append in `items` order so user
     // ordering is preserved across the new variants.
@@ -706,6 +706,49 @@ pub(crate) fn footer_git_branch_spans(app: &App) -> Vec<Span<'static>> {
         label,
         Style::default().fg(app.ui_theme.text_muted),
     )]
+}
+
+fn footer_shell_spans(app: &App) -> Vec<Span<'static>> {
+    if let Some(label) = active_foreground_shell_label(app) {
+        return crate::tui::widgets::footer_shell_label_chip(label);
+    }
+
+    let mut running = app.task_panel.iter().filter(|task| {
+        task.kind == TaskPanelEntryKind::Background
+            && task.status == "running"
+            && task.id.starts_with("shell_")
+    });
+    let Some(first) = running.next() else {
+        return Vec::new();
+    };
+    let extra = running.count();
+    let command = first
+        .prompt_summary
+        .strip_prefix("shell: ")
+        .unwrap_or(first.prompt_summary.as_str());
+    let label = if extra == 0 {
+        format!("shell bg: {}", concise_shell_command_label(command, 48))
+    } else {
+        format!("shell bg: {} jobs", extra + 1)
+    };
+    crate::tui::widgets::footer_shell_label_chip(label)
+}
+
+fn active_foreground_shell_label(app: &App) -> Option<String> {
+    let active = app.active_cell.as_ref()?;
+    active.entries().iter().find_map(|cell| {
+        let HistoryCell::Tool(ToolCell::Exec(exec)) = cell else {
+            return None;
+        };
+        if exec.status == ToolStatus::Running && exec.interaction.is_none() {
+            Some(format!(
+                "shell fg: {}",
+                concise_shell_command_label(&exec.command, 48)
+            ))
+        } else {
+            None
+        }
+    })
 }
 
 pub(crate) fn footer_prefix_stability_spans(app: &App) -> Vec<Span<'static>> {
@@ -832,7 +875,7 @@ pub(crate) fn footer_auxiliary_spans(app: &App, max_width: usize) -> Vec<Span<'s
         })
         .unwrap_or_default();
 
-    let shell_spans = crate::tui::widgets::footer_shell_chip(active_foreground_shell_running(app));
+    let shell_spans = footer_shell_spans(app);
 
     let parts: Vec<&Vec<Span<'static>>> = [
         &agents_spans,
