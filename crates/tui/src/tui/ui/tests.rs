@@ -3748,9 +3748,24 @@ fn jobs_panel_ignores_model_reasoning_but_shows_for_real_jobs() {
         "model reasoning alone must not surface the jobs panel"
     );
 
-    // A real background job (Background) does surface it.
+    // Completed background history must not reopen the auto Tasks panel.
     app.task_panel.push(crate::tui::app::TaskPanelEntry {
         id: "shell_1".to_string(),
+        status: "completed".to_string(),
+        prompt_summary: "shell: cargo fmt".to_string(),
+        duration_ms: Some(10),
+        kind: crate::tui::app::TaskPanelEntryKind::Background,
+        stale: false,
+        elapsed_since_output_ms: None,
+    });
+    assert!(
+        crate::tui::sidebar::sidebar_auto_idle(&mut app),
+        "completed background jobs must not reopen the auto jobs panel"
+    );
+
+    // A live background job (Background + running/queued) does surface it.
+    app.task_panel.push(crate::tui::app::TaskPanelEntry {
+        id: "shell_2".to_string(),
         status: "running".to_string(),
         prompt_summary: "shell: cargo test".to_string(),
         duration_ms: Some(10),
@@ -3760,7 +3775,7 @@ fn jobs_panel_ignores_model_reasoning_but_shows_for_real_jobs() {
     });
     assert!(
         !crate::tui::sidebar::sidebar_auto_idle(&mut app),
-        "a real background job must surface the jobs panel"
+        "a live background job must surface the jobs panel"
     );
 }
 

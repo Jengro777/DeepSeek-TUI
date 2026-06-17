@@ -2401,7 +2401,12 @@ async fn run_event_loop(
                             terminal_paused_at = None;
                         }
                     }
-                    EngineEvent::AgentSpawned { id, prompt } => {
+                    EngineEvent::AgentSpawned {
+                        id,
+                        prompt,
+                        parent_run_id,
+                        spawn_depth,
+                    } => {
                         let prompt_summary = summarize_tool_output(&prompt);
                         execute_subagent_observer_hook(
                             app,
@@ -2412,6 +2417,13 @@ async fn run_event_loop(
                         );
                         app.agent_progress
                             .insert(id.clone(), format!("starting: {prompt_summary}"));
+                        app.agent_progress_meta.insert(
+                            id.clone(),
+                            crate::tui::app::AgentProgressMeta {
+                                parent_run_id,
+                                spawn_depth,
+                            },
+                        );
                         if app.agent_activity_started_at.is_none() {
                             app.agent_activity_started_at = Some(Instant::now());
                         }
@@ -2421,7 +2433,12 @@ async fn run_event_loop(
                         app.status_message = Some(format!("{label} starting: {prompt_summary}"));
                         subagent_list_refresh_requested = true;
                     }
-                    EngineEvent::AgentProgress { id, status } => {
+                    EngineEvent::AgentProgress {
+                        id,
+                        status,
+                        parent_run_id,
+                        spawn_depth,
+                    } => {
                         let display = friendly_subagent_progress(app, &id, &status);
                         if is_noisy_subagent_progress(&status) {
                             app.agent_progress
@@ -2430,6 +2447,13 @@ async fn run_event_loop(
                         } else {
                             app.agent_progress.insert(id.clone(), display.clone());
                         }
+                        app.agent_progress_meta.insert(
+                            id.clone(),
+                            crate::tui::app::AgentProgressMeta {
+                                parent_run_id,
+                                spawn_depth,
+                            },
+                        );
                         if app.agent_activity_started_at.is_none() {
                             app.agent_activity_started_at = Some(Instant::now());
                         }
@@ -2477,6 +2501,7 @@ async fn run_event_loop(
                                         && matches!(agent.status, SubAgentStatus::Running)
                                 });
                         app.agent_progress.remove(&id);
+                        app.agent_progress_meta.remove(&id);
                         // #3030: stable label with raw-id fallback.
                         let label = app.agent_display_label(&id);
                         app.status_message = Some(format!(

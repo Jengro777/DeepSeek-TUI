@@ -150,10 +150,20 @@ pub enum Event {
 
     // === Sub-Agent Events ===
     /// A sub-agent has been spawned
-    AgentSpawned { id: String, prompt: String },
+    AgentSpawned {
+        id: String,
+        prompt: String,
+        parent_run_id: Option<String>,
+        spawn_depth: u32,
+    },
 
     /// Sub-agent progress update
-    AgentProgress { id: String, status: String },
+    AgentProgress {
+        id: String,
+        status: String,
+        parent_run_id: Option<String>,
+        spawn_depth: u32,
+    },
 
     /// Sub-agent completed
     AgentComplete { id: String, result: String },

@@ -2539,7 +2539,7 @@ impl RuntimeThreadManager {
                         .await?;
                     }
                 }
-                EngineEvent::AgentSpawned { id, prompt } => {
+                EngineEvent::AgentSpawned { id, prompt, .. } => {
                     let message = format!(
                         "Sub-agent {id} spawned: {}",
                         summarize_text(&prompt, SUMMARY_LIMIT)
@@ -2568,7 +2568,7 @@ impl RuntimeThreadManager {
                     )
                     .await?;
                 }
-                EngineEvent::AgentProgress { id, status } => {
+                EngineEvent::AgentProgress { id, status, .. } => {
                     let message = format!("Sub-agent {id}: {status}");
                     let item = TurnItemRecord {
                         schema_version: CURRENT_RUNTIME_SCHEMA_VERSION,

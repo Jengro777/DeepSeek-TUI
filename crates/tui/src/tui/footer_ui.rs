@@ -77,7 +77,9 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
             .turn_started_at
             .map(|t| t.elapsed().as_secs())
             .unwrap_or(0);
-        let mut label = active_subagent_status_label(app)
+        let active_subagent_label = active_subagent_status_label(app);
+        let mut label = active_subagent_label
+            .clone()
             .or_else(|| active_tool_status_label(app))
             .unwrap_or_else(|| {
                 // Show the working label during active turns (loading, compacting, etc.).
@@ -93,6 +95,9 @@ pub(crate) fn render_footer(f: &mut Frame, area: Rect, app: &mut App) {
             label = format!("{label}  ({reason})");
         }
         props.state_label = label;
+        if active_subagent_label.is_some() {
+            props.agents.clear();
+        }
         props.state_color = palette::DEEPSEEK_SKY;
 
         // Water-spout frame source: wall-clock milliseconds. The sine-wave
@@ -244,7 +249,10 @@ pub(crate) fn footer_working_label_frame(now_ms: u64, fancy_animations: bool) ->
 
 #[cfg(test)]
 mod tests {
-    use super::{footer_state_label, footer_working_label_frame, one_line_summary};
+    use super::{
+        active_subagent_status_label, footer_state_label, footer_working_label_frame,
+        one_line_summary,
+    };
     use crate::config::Config;
     use crate::tui::app::{App, TuiOptions};
     use std::path::PathBuf;
@@ -262,6 +270,21 @@ mod tests {
         let summary = one_line_summary("read \x1b[38;2;6;174;242mfile.rs\x1b[0m", 80);
         assert_eq!(summary, "read file.rs");
         assert!(!summary.contains("38;2"));
+    }
+
+    #[test]
+    fn active_subagent_status_label_is_descriptive_without_shortcut_or_timer() {
+        let mut app = create_test_app();
+        app.agent_progress.insert(
+            "agent_live".to_string(),
+            "reading summary files".to_string(),
+        );
+
+        let label = active_subagent_status_label(&app).expect("active agent label");
+
+        assert_eq!(label, "agents 1/1 running · reading summary files");
+        assert!(!label.contains("Ctrl+Alt+4"));
+        assert!(!label.contains("0s"));
     }
 
     fn create_test_app() -> App {
@@ -397,17 +420,9 @@ pub(crate) fn active_subagent_status_label(app: &App) -> Option<String> {
         })
         .unwrap_or_else(|| "working".to_string());
     let detail = truncate_line_to_width(&detail, 34);
-    let elapsed = app
-        .agent_activity_started_at
-        .or(app.turn_started_at)
-        .map(|started| format!("{}s", started.elapsed().as_secs()));
-
-    let mut parts = vec![format!("agents {display_running}/{total}"), detail];
-    if let Some(elapsed) = elapsed {
-        parts.push(elapsed);
-    }
-    parts.push("Ctrl+Alt+4".to_string());
-    Some(parts.join(" \u{00B7} "))
+    Some(format!(
+        "agents {display_running}/{total} running \u{00B7} {detail}"
+    ))
 }
 
 #[derive(Default)]

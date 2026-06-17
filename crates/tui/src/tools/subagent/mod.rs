@@ -2409,6 +2409,8 @@ impl SubAgentManager {
             let _ = event_tx.try_send(Event::AgentSpawned {
                 id: agent_id.clone(),
                 prompt: prompt.clone(),
+                parent_run_id: runtime.parent_agent_id.clone(),
+                spawn_depth: runtime.spawn_depth,
             });
         }
 
@@ -3513,6 +3515,8 @@ async fn record_queued_launch_progress(task: &SubAgentTask) {
         task.runtime.mailbox.as_ref(),
         &task.agent_id,
         SUBAGENT_QUEUED_LAUNCH_REASON.to_string(),
+        task.runtime.parent_agent_id.clone(),
+        task.runtime.spawn_depth,
     );
 }
 
@@ -3719,6 +3723,8 @@ fn record_agent_progress(runtime: &SubAgentRuntime, agent_id: &str, message: imp
         runtime.mailbox.as_ref(),
         agent_id,
         message,
+        runtime.parent_agent_id.clone(),
+        runtime.spawn_depth,
     );
 }
 
@@ -5046,6 +5052,8 @@ fn emit_agent_progress(
     mailbox: Option<&Mailbox>,
     agent_id: &str,
     status: String,
+    parent_run_id: Option<String>,
+    spawn_depth: u32,
 ) {
     if let Some(mb) = mailbox {
         let _ = mb.send(MailboxMessage::progress(agent_id, status.clone()));
@@ -5054,6 +5062,8 @@ fn emit_agent_progress(
         let _ = event_tx.try_send(Event::AgentProgress {
             id: agent_id.to_string(),
             status,
+            parent_run_id,
+            spawn_depth,
         });
     }
 }

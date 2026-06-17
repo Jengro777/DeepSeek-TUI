@@ -6751,12 +6751,12 @@ async fn run_exec_agent(
                     }
                 }
             },
-            Event::AgentSpawned { id, prompt }
+            Event::AgentSpawned { id, prompt, .. }
                 if output_format == ExecOutputFormat::Text && !json_output =>
             {
                 eprintln!("sub-agent {id} spawned: {}", summarize_tool_output(&prompt));
             }
-            Event::AgentProgress { id, status }
+            Event::AgentProgress { id, status, .. }
                 if output_format == ExecOutputFormat::Text && !json_output =>
             {
                 eprintln!("sub-agent {id}: {status}");

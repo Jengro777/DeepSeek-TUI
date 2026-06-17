@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 
 use crate::task_manager::{TaskRecord, TaskStatus, TaskSummary};
 use crate::tools::subagent::{MailboxMessage, SubAgentResult, SubAgentStatus};
-use crate::tui::app::{App, AppMode, TaskPanelEntry, TaskPanelEntryKind};
+use crate::tui::app::{AgentProgressMeta, App, AppMode, TaskPanelEntry, TaskPanelEntryKind};
 use crate::tui::history::{HistoryCell, SubAgentCell, summarize_tool_output};
 use crate::tui::pager::PagerView;
 use crate::tui::tool_routing::refreshes_workspace_context_on_completion;
@@ -70,8 +70,18 @@ pub(super) fn reconcile_subagent_activity_state_at(app: &mut App, now: Instant) 
         running_agents.iter().map(|(id, _)| id.clone()).collect();
     app.agent_progress
         .retain(|id, _| running_ids.contains(id.as_str()));
+    app.agent_progress_meta
+        .retain(|id, _| running_ids.contains(id.as_str()));
     for (id, objective) in running_agents {
-        app.agent_progress.entry(id).or_insert(objective);
+        app.agent_progress.entry(id.clone()).or_insert(objective);
+        if let Some(agent) = app.subagent_cache.iter().find(|agent| agent.agent_id == id) {
+            app.agent_progress_meta
+                .entry(id.clone())
+                .or_insert_with(|| AgentProgressMeta {
+                    parent_run_id: agent.parent_run_id.clone(),
+                    spawn_depth: agent.spawn_depth,
+                });
+        }
     }
 
     if running_ids.is_empty() {

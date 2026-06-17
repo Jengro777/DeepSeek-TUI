@@ -339,6 +339,12 @@ pub enum SidebarFocus {
     Hidden,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentProgressMeta {
+    pub parent_run_id: Option<String>,
+    pub spawn_depth: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ComposerDensity {
     Compact,
@@ -1575,6 +1581,8 @@ pub struct App {
     pub subagent_terminal_seen_at: HashMap<String, Instant>,
     /// Last known per-agent progress text for running sub-agents.
     pub agent_progress: HashMap<String, String>,
+    /// Parent/depth metadata for live progress-only sub-agent rows.
+    pub agent_progress_meta: HashMap<String, AgentProgressMeta>,
     /// In-transcript sub-agent card index by `agent_id` (issue #128).
     /// Maps each live sub-agent to the `HistoryCell::SubAgent` it renders
     /// into, so successive mailbox envelopes mutate the same cell rather
@@ -2355,6 +2363,7 @@ impl App {
             subagent_cache: Vec::new(),
             subagent_terminal_seen_at: HashMap::new(),
             agent_progress: HashMap::new(),
+            agent_progress_meta: HashMap::new(),
             subagent_card_index: HashMap::new(),
             last_fanout_card_index: None,
             pending_subagent_dispatch: None,
