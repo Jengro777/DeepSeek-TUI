@@ -15,6 +15,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added a read-only `/config ask-rules` view for the resolved
   `permissions.toml` path, file status, rule count, and configured
   tool/command/path ask rules. Merged from #3569 by @greyfreedom.
+- Added provider-level `context_window` overrides so OpenAI-compatible
+  gateways and self-hosted providers can budget against their real model
+  context window (#3545).
 
 ### Changed
 
