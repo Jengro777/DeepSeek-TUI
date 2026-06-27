@@ -67,8 +67,8 @@ fn eval_harness_runs_shell_command(world: &mut EvalSmokeWorld) {
     world.report = Some(report);
 }
 
-#[then("the binary exits successfully")]
-fn binary_exits_successfully(world: &mut EvalSmokeWorld) {
+#[then("the binary exits without crashing")]
+fn binary_exits_without_crashing(world: &mut EvalSmokeWorld) {
     let status = world
         .exit_status
         .expect("exit status should have been captured");
